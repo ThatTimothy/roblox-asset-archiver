@@ -1,6 +1,11 @@
-use clap::{Parser, Subcommand};
+use anyhow::Error;
+use clap::{ArgAction, Parser, Subcommand};
+use log::LevelFilter;
 
-use crate::download::{DownloadType, download};
+use crate::{
+    api::Client,
+    download::{DownloadType, download},
+};
 
 /// A simple CLI tool to back up and archive every asset (games, places, models, images, passes, etc) on Roblox into a Rojo-compatible Git repository
 #[derive(Parser, Debug)]
@@ -9,6 +14,10 @@ struct Args {
     /// Open Cloud API key (create at https://create.roblox.com/dashboard/credentials)
     #[arg(long, env = "ROBLOX_API_KEY", hide_env_values = true)]
     api_key: String,
+
+    /// Increase log level (default info, -v debug, -vv trace)
+    #[arg(short, long, action = ArgAction::Count, global = true)]
+    verbose: u8,
 
     #[command(subcommand)]
     command: Command,
@@ -39,8 +48,21 @@ enum DownloadCommand {
     },
 }
 
-pub(crate) fn run() {
+pub(crate) async fn run() -> Result<(), Error> {
     let args = Args::parse();
+    env_logger::builder()
+        .filter_module(
+            env!("CARGO_CRATE_NAME"),
+            match args.verbose {
+                ..=0 => LevelFilter::Info,
+                1 => LevelFilter::Debug,
+                2.. => LevelFilter::Trace,
+            },
+        )
+        .parse_default_env()
+        .init();
+
+    let client = Client::new(args.api_key);
 
     match args.command {
         Command::Download(command) => match command {
@@ -48,7 +70,16 @@ pub(crate) fn run() {
                 place_id,
                 output_dir,
                 references,
-            } => download(output_dir, DownloadType::Place, place_id, references),
+            } => {
+                download(
+                    client,
+                    output_dir,
+                    DownloadType::Place,
+                    place_id,
+                    references,
+                )
+                .await
+            }
         },
     }
 }
