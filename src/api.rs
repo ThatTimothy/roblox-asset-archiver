@@ -1,8 +1,13 @@
-use std::fmt::Display;
+use std::{
+    collections::HashMap,
+    fmt::Display,
+    time::{Duration, Instant},
+};
 
-use log::trace;
+use log::{trace, warn};
 use reqwest::{IntoUrl, Method, Request, Response, StatusCode, Url, header::HeaderMap};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use tokio::{sync::Mutex, time::sleep};
 
 const API_BASE: &'static str = "https://apis.roblox.com";
 const API_HOST: &'static str = "apis.roblox.com";
@@ -71,6 +76,11 @@ pub enum RequestError {
     },
 }
 pub type Result<T> = std::result::Result<T, RequestError>;
+
+struct RatelimitBucket {
+    pub remaining: u64,
+    pub reset: Instant,
+}
 
 #[derive(Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -212,6 +222,7 @@ pub struct AssetVersionsResponse {
 pub struct Client {
     http: reqwest::Client,
     api_key: String,
+    ratelimits: Mutex<HashMap<String, RatelimitBucket>>,
 }
 
 impl Client {
@@ -224,13 +235,17 @@ impl Client {
             ))
             .build()
             .unwrap();
-        Self { http, api_key }
+        Self {
+            ratelimits: Mutex::new(HashMap::new()),
+            http,
+            api_key,
+        }
     }
 
     /// Sends a request, parses error out and returns raw response in success case
     /// Errors docs: https://create.roblox.com/docs/cloud/reference/errors
     /// Rate limit docs: https://create.roblox.com/docs/cloud/reference/rate-limits
-    async fn send_request(&self, mut request: Request) -> Result<Response> {
+    async fn send_request(&self, ratelimit_key: String, mut request: Request) -> Result<Response> {
         let method = request.method().clone();
         let url = request.url().to_string();
         // By default, query params are stripped (this is mainly for non-api URLs that expose secrets in query)
@@ -249,45 +264,141 @@ impl Client {
             redacted_url = url.clone();
         }
 
-        trace!("Requesting {method} {redacted_url}");
-        let req_err = |source| RequestError::Request {
-            method: method.clone(),
-            url: redacted_url.clone(),
-            source,
-        };
-        let response = self.http.execute(request).await.map_err(req_err)?;
-        let status = response.status();
+        // Keep retrying on ratelimits
+        loop {
+            // Before requesting, check for existing ratelimit
+            let retry_after: Option<Duration> = {
+                let mut ratelimits = self.ratelimits.lock().await;
+                let bucket = ratelimits
+                    .entry(ratelimit_key.clone())
+                    .or_insert(RatelimitBucket {
+                        remaining: 1,
+                        reset: Instant::now(),
+                    });
+                let now = Instant::now();
+                // If no requests remaining and before reset, need to wait until reset
+                if bucket.remaining <= 0 && bucket.reset > now {
+                    Some(bucket.reset - now)
+                } else {
+                    None
+                }
+            };
 
-        trace!("{status} on {method} {redacted_url}");
+            // If need to retry after, wait then reset remaining to 1 (we will get the right value from header)
+            if let Some(retry_after) = retry_after {
+                warn!(
+                    "Out of requests on {redacted_url}, retrying in {:.2}s to avoid ratelimit",
+                    retry_after.as_secs_f64()
+                );
+                sleep(retry_after).await;
 
-        if !status.is_success() {
-            let headers = response.headers().clone();
-            let text = response.text().await.map_err(req_err)?;
-            return Err(RequestError::Api {
+                let mut ratelimits = self.ratelimits.lock().await;
+                ratelimits.get_mut(&ratelimit_key).unwrap().remaining = 1;
+                trace!("Finished waiting, retrying {ratelimit_key} with remaining=1");
+            }
+
+            {
+                let mut ratelimits = self.ratelimits.lock().await;
+                let bucket = ratelimits.get_mut(&ratelimit_key).unwrap();
+                if bucket.remaining > 0 {
+                    bucket.remaining -= 1;
+                }
+            }
+
+            trace!("Requesting {method} {redacted_url}");
+            let req_err = |source| RequestError::Request {
                 method: method.clone(),
-                url: url.clone(),
-                status,
-                headers: headers,
-                error: serde_json::from_str(&text).map_err(|source| RequestError::Parse {
-                    method: method.clone(),
-                    url: redacted_url.clone(),
-                    body: text.clone(),
-                    source,
-                })?,
-            });
-        }
+                url: redacted_url.clone(),
+                source,
+            };
+            let response = self
+                .http
+                .execute(request.try_clone().unwrap())
+                .await
+                .map_err(req_err)?;
+            let status = response.status();
 
-        Ok(response)
+            trace!("{status} on {method} {redacted_url}");
+
+            // Ratelimits automatically retried based on headers
+            let headers = response.headers();
+            let remaining_header: Option<u64> = headers
+                .get("x-ratelimit-remaining")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse().ok());
+            let reset_header: Option<u64> = headers
+                .get("x-ratelimit-reset")
+                .and_then(|value| value.to_str().ok())
+                .or_else(|| {
+                    headers
+                        .get("retry-after")
+                        .and_then(|value| value.to_str().ok())
+                })
+                .and_then(|value| value.parse().ok());
+
+            if let Some(remaining) = remaining_header
+                && let Some(reset) = reset_header
+            {
+                let mut ratelimits = self.ratelimits.lock().await;
+                let bucket = ratelimits.get_mut(&ratelimit_key).unwrap();
+                // If a true reset, remaining will go from 0 back up
+                if bucket.remaining == 0 && remaining > 0 {
+                    trace!(
+                        "Detected bucket reset, updating {ratelimit_key} remaining to {remaining}"
+                    );
+                    bucket.remaining = remaining;
+                }
+
+                // Always update reset
+                bucket.reset = Instant::now() + Duration::from_secs(reset);
+            }
+
+            // If we hit this status, we messed up tracking - sleep and retry
+            if status == StatusCode::TOO_MANY_REQUESTS {
+                {
+                    let mut ratelimits = self.ratelimits.lock().await;
+                    ratelimits.get_mut(&ratelimit_key).unwrap().remaining = 0;
+                }
+                let retry_after = reset_header.unwrap_or(5);
+                warn!(
+                    "Ratelimited on {redacted_url}, retrying in {:.2}s",
+                    retry_after
+                );
+                sleep(Duration::from_secs(retry_after)).await;
+                trace!("Finished waiting, retrying {ratelimit_key}");
+                continue;
+            }
+
+            if !status.is_success() {
+                let headers = response.headers().clone();
+                let text = response.text().await.map_err(req_err)?;
+                return Err(RequestError::Api {
+                    method: method.clone(),
+                    url: url.clone(),
+                    status,
+                    headers: headers,
+                    error: serde_json::from_str(&text).map_err(|source| RequestError::Parse {
+                        method: method.clone(),
+                        url: redacted_url.clone(),
+                        body: text.clone(),
+                        source,
+                    })?,
+                });
+            }
+
+            return Ok(response);
+        }
     }
 
     /// Sends a request and handles deserialization
     async fn send_request_and_deserialize<Res: DeserializeOwned>(
         &self,
+        ratelimit_key: String,
         request: Request,
     ) -> Result<Res> {
         let method = request.method().clone();
         let url = request.url().to_string();
-        let response = self.send_request(request).await?;
+        let response = self.send_request(ratelimit_key, request).await?;
         let text = response
             .text()
             .await
@@ -307,8 +418,13 @@ impl Client {
     }
 
     /// Gets a specific Url and attempts to deserialize response
-    pub async fn get<U: IntoUrl, Res: DeserializeOwned>(&self, url: U) -> Result<Res> {
+    pub async fn get<U: IntoUrl, Res: DeserializeOwned>(
+        &self,
+        ratelimit_key: String,
+        url: U,
+    ) -> Result<Res> {
         self.send_request_and_deserialize(
+            ratelimit_key,
             self.http.get(url).build().expect("Failed to build request"),
         )
         .await
@@ -317,10 +433,12 @@ impl Client {
     /// Gets a specific Url, serializing body, and attempts to deserialize response
     pub async fn post<U: IntoUrl, Req: Serialize, Res: DeserializeOwned>(
         &self,
+        ratelimit_key: String,
         url: U,
         body: Req,
     ) -> Result<Res> {
         self.send_request_and_deserialize(
+            ratelimit_key,
             self.http
                 .post(url)
                 .json(&body)
@@ -331,15 +449,19 @@ impl Client {
     }
 
     // Gets a specific Url, handling errors, returning the raw response if successful
-    pub async fn raw_get<U: IntoUrl>(&self, url: U) -> Result<Response> {
-        self.send_request(self.http.get(url).build().expect("Failed to build request"))
-            .await
+    pub async fn raw_get<U: IntoUrl>(&self, ratelimit_key: String, url: U) -> Result<Response> {
+        self.send_request(
+            ratelimit_key,
+            self.http.get(url).build().expect("Failed to build request"),
+        )
+        .await
     }
 
     /// Returns introspection of an API key - can be used to validate if an API key is enabled and not expired
     /// Docs: https://create.roblox.com/docs/cloud/auth/api-keys#introspect-api-keys
     pub async fn introspect(&self) -> Result<IntrospectResponse> {
         self.post(
+            "introspect".to_owned(),
             format!("{API_BASE}/api-keys/v1/introspect"),
             IntrospectRequest {
                 api_key: self.api_key.clone(),
@@ -355,9 +477,10 @@ impl Client {
         &self,
         place_id: u64,
     ) -> Result<UniverseContainingPlaceResponse> {
-        self.get(format!(
-            "{API_BASE}/universes/v1/places/{place_id}/universe"
-        ))
+        self.get(
+            "universe_containing_place".to_owned(),
+            format!("{API_BASE}/universes/v1/places/{place_id}/universe"),
+        )
         .await
     }
 
@@ -365,17 +488,21 @@ impl Client {
     /// Requires no authentication
     /// Docs: https://create.roblox.com/docs/en-us/cloud/reference/features/universes#Cloud_GetUniverse
     pub async fn universe(&self, universe_id: u64) -> Result<Universe> {
-        self.get(format!("{API_BASE}/cloud/v2/universes/{universe_id}"))
-            .await
+        self.get(
+            "universe".to_owned(),
+            format!("{API_BASE}/cloud/v2/universes/{universe_id}"),
+        )
+        .await
     }
 
     /// Gets details for a place
     /// Requires no authentication
     /// Docs: https://create.roblox.com/docs/en-us/cloud/reference/features/places#Cloud_GetPlace
     pub async fn place(&self, universe_id: u64, place_id: u64) -> Result<Place> {
-        self.get(format!(
-            "{API_BASE}/cloud/v2/universes/{universe_id}/places/{place_id}"
-        ))
+        self.get(
+            "place".to_owned(),
+            format!("{API_BASE}/cloud/v2/universes/{universe_id}/places/{place_id}"),
+        )
         .await
     }
 
@@ -396,7 +523,7 @@ impl Client {
                 query.append_pair("cursor", &next_cursor);
             }
         }
-        self.get(url).await
+        self.get("place_versions_page".to_owned(), url).await
     }
 
     /// Gets all versions of a place, with notes and contributor information
@@ -436,9 +563,10 @@ impl Client {
         asset_id: u64,
         version: u64,
     ) -> Result<AssetDeliveryResponse> {
-        self.get(format!(
-            "{API_BASE}/asset-delivery-api/v1/assetId/{asset_id}/version/{version}"
-        ))
+        self.get(
+            "asset_version_delivery".to_owned(),
+            format!("{API_BASE}/asset-delivery-api/v1/assetId/{asset_id}/version/{version}"),
+        )
         .await
     }
 
@@ -457,7 +585,7 @@ impl Client {
                 query.append_pair("pageToken", &next_page_token);
             }
         }
-        self.get(url).await
+        self.get("asset_versions_page".to_owned(), url).await
     }
 
     /// Gets all versions of an asset

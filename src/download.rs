@@ -46,7 +46,9 @@ async fn download_to_file<P: AsRef<Path>>(
         None => None,
     };
 
-    let mut response = client.raw_get(delivery_response.location).await?;
+    let mut response = client
+        .raw_get("asset_download".to_owned(), delivery_response.location)
+        .await?;
     debug!("Start streaming content {}", path.as_ref().display());
     if uncompressed_length.is_some() {
         bar.set_length(uncompressed_length.unwrap());
