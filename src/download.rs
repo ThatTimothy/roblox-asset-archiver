@@ -15,23 +15,15 @@ pub enum DownloadType {
     Place,
 }
 
-async fn download_to_file<P: AsRef<Path>>(url: String, path: P) -> Result<()> {
+async fn download_to_file<P: AsRef<Path>>(client: &Client, url: String, path: P) -> Result<()> {
     let url = Url::parse(&url)?;
-    let mut redacted_url = url.clone();
-    redacted_url.set_query(None);
-    trace!("Start download from {redacted_url} (token redacted)",);
-    let mut response = reqwest::get(url.clone()).await?;
-    if !response.status().is_success() {
-        bail!("Failed to download {redacted_url}");
-    }
+    let mut response = client.raw_get(url).await?;
+    debug!("Start streaming content {}", path.as_ref().display());
     let mut file = File::create(&path).await?;
     while let Some(item) = response.chunk().await? {
         file.write_all(&item).await?;
     }
-    trace!(
-        "Streamed content to {} from {redacted_url} (token redacted)",
-        path.as_ref().display()
-    );
+    debug!("Streamed content to {}", path.as_ref().display());
     Ok(())
 }
 
@@ -138,7 +130,7 @@ pub async fn download(
                     ))?;
                 debug!("Got delivery URL for version {version}, starting download",);
                 let file_path = Path::join(dir_path, format!("v{version}.rbxl"));
-                download_to_file(delivery_response.location, &file_path).await?;
+                download_to_file(&client, delivery_response.location, &file_path).await?;
                 eprintln!(
                     "Downloaded version {}/{} to `{}`",
                     version,

@@ -59,6 +59,7 @@ pub(crate) async fn run() -> Result<(), Error> {
                 2.. => LevelFilter::Trace,
             },
         )
+        .format_timestamp_millis()
         .parse_default_env()
         .init();
 

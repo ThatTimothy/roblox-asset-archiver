@@ -1,10 +1,13 @@
 use std::fmt::Display;
 
 use log::trace;
-use reqwest::{IntoUrl, Method, RequestBuilder, StatusCode, Url, header::HeaderMap};
+use reqwest::{
+    IntoUrl, Method, Request, RequestBuilder, Response, StatusCode, Url, header::HeaderMap,
+};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 const API_BASE: &'static str = "https://apis.roblox.com";
+const API_HOST: &'static str = "apis.roblox.com";
 
 #[derive(Deserialize, Debug)]
 pub struct APICodeMessageError {
@@ -217,62 +220,113 @@ impl Client {
         Self { http, api_key }
     }
 
-    /// Sends a request and handles deserialization
+    /// Sends a request, parses error out and returns raw response in success case
     /// Errors docs: https://create.roblox.com/docs/cloud/reference/errors
     /// Rate limit docs: https://create.roblox.com/docs/cloud/reference/rate-limits
-    async fn send_request<Res: DeserializeOwned>(&self, request: RequestBuilder) -> Result<Res> {
-        let mut request = request.build().expect("Failed to build request");
+    async fn send_request(&self, mut request: Request) -> Result<Response> {
         let method = request.method().clone();
         let url = request.url().to_string();
+        // By default, query params are stripped (this is mainly for non-api URLs that expose secrets in query)
+        let mut redacted_url = {
+            let mut redacted = request.url().clone();
+            redacted.set_query(None);
+            format!("{} (redacted query) ", redacted.to_string())
+        };
 
-        if url.starts_with(API_BASE) {
+        // API specific handling
+        if request.url().host_str() == Some(API_HOST) {
             request
                 .headers_mut()
                 .insert("X-API-KEY", self.api_key.parse().unwrap());
+            // API does not expose secret in query
+            redacted_url = url.clone();
         }
 
-        trace!("Requesting {method} {url}");
+        trace!("Requesting {method} {redacted_url}");
         let req_err = |source| RequestError::Request {
             method: method.clone(),
-            url: url.clone(),
+            url: redacted_url.clone(),
             source,
         };
         let response = self.http.execute(request).await.map_err(req_err)?;
         let status = response.status();
-        let headers = response.headers().clone();
-        let text = response.text().await.map_err(req_err)?;
 
-        let parse_err = |source| RequestError::Parse {
-            method: method.clone(),
-            url: url.clone(),
-            body: text.clone(),
-            source,
-        };
-        trace!("{status} on {method} {url}");
+        trace!("{status} on {method} {redacted_url}");
 
         if !status.is_success() {
+            let headers = response.headers().clone();
+            let text = response.text().await.map_err(req_err)?;
             return Err(RequestError::Api {
                 method: method.clone(),
                 url: url.clone(),
                 status,
                 headers: headers,
-                error: serde_json::from_str(&text).map_err(parse_err)?,
+                error: serde_json::from_str(&text).map_err(|source| RequestError::Parse {
+                    method: method.clone(),
+                    url: redacted_url.clone(),
+                    body: text.clone(),
+                    source,
+                })?,
             });
         }
 
-        Ok(serde_json::from_str(&text).map_err(parse_err)?)
+        Ok(response)
     }
 
-    async fn get<U: IntoUrl, Res: DeserializeOwned>(&self, url: U) -> Result<Res> {
-        self.send_request(self.http.get(url)).await
+    /// Sends a request and handles deserialization
+    async fn send_request_and_deserialize<Res: DeserializeOwned>(
+        &self,
+        request: Request,
+    ) -> Result<Res> {
+        let method = request.method().clone();
+        let url = request.url().to_string();
+        let response = self.send_request(request).await?;
+        let text = response
+            .text()
+            .await
+            .map_err(|source| RequestError::Request {
+                method: method.clone(),
+                url: url.clone(),
+                source,
+            })?;
+        Ok(
+            serde_json::from_str(&text).map_err(|source| RequestError::Parse {
+                method: method.clone(),
+                url: url.clone(),
+                body: text.clone(),
+                source,
+            })?,
+        )
     }
 
-    async fn post<U: IntoUrl, Req: Serialize, Res: DeserializeOwned>(
+    /// Gets a specific Url and attempts to deserialize response
+    pub async fn get<U: IntoUrl, Res: DeserializeOwned>(&self, url: U) -> Result<Res> {
+        self.send_request_and_deserialize(
+            self.http.get(url).build().expect("Failed to build request"),
+        )
+        .await
+    }
+
+    /// Gets a specific Url, serializing body, and attempts to deserialize response
+    pub async fn post<U: IntoUrl, Req: Serialize, Res: DeserializeOwned>(
         &self,
         url: U,
         body: Req,
     ) -> Result<Res> {
-        self.send_request(self.http.post(url).json(&body)).await
+        self.send_request_and_deserialize(
+            self.http
+                .post(url)
+                .json(&body)
+                .build()
+                .expect("Failed to build request"),
+        )
+        .await
+    }
+
+    // Gets a specific Url, handling errors, returning the raw response if successful
+    pub async fn raw_get<U: IntoUrl>(&self, url: U) -> Result<Response> {
+        self.send_request(self.http.get(url).build().expect("Failed to build request"))
+            .await
     }
 
     /// Returns introspection of an API key - can be used to validate if an API key is enabled and not expired
