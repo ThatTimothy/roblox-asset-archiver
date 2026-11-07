@@ -1,9 +1,7 @@
 use std::fmt::Display;
 
 use log::trace;
-use reqwest::{
-    IntoUrl, Method, Request, RequestBuilder, Response, StatusCode, Url, header::HeaderMap,
-};
+use reqwest::{IntoUrl, Method, Request, Response, StatusCode, Url, header::HeaderMap};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 const API_BASE: &'static str = "https://apis.roblox.com";
@@ -159,8 +157,17 @@ pub struct PlaceVersionsResponse {
 
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
+pub struct AssetDeliveryMetadata {
+    pub metadata_type: i64,
+    pub value: String,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct AssetDeliveryResponse {
     pub location: String,
+    /// If exists, assetMetadataType == 1 is the uncompressed length in bytes
+    pub asset_metadatas: Option<Vec<AssetDeliveryMetadata>>,
 }
 
 #[derive(Deserialize, Debug)]

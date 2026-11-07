@@ -5,6 +5,7 @@ use log::LevelFilter;
 use crate::{
     api::Client,
     download::{DownloadType, download},
+    progress::Progress,
 };
 
 /// A simple CLI tool to back up and archive every asset (games, places, models, images, passes, etc) on Roblox into a Rojo-compatible Git repository
@@ -50,7 +51,7 @@ enum DownloadCommand {
 
 pub(crate) async fn run() -> Result<(), Error> {
     let args = Args::parse();
-    env_logger::builder()
+    let logger = env_logger::builder()
         .filter_module(
             env!("CARGO_CRATE_NAME"),
             match args.verbose {
@@ -61,7 +62,8 @@ pub(crate) async fn run() -> Result<(), Error> {
         )
         .format_timestamp_millis()
         .parse_default_env()
-        .init();
+        .build();
+    let progress = Progress::new(logger);
 
     let client = Client::new(args.api_key);
 
@@ -73,6 +75,7 @@ pub(crate) async fn run() -> Result<(), Error> {
                 references,
             } => {
                 download(
+                    progress,
                     client,
                     output_dir,
                     DownloadType::Place,

@@ -5,6 +5,7 @@ use log::debug;
 mod api;
 mod cli;
 mod download;
+mod progress;
 
 #[tokio::main]
 async fn main() {
