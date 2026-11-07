@@ -46,6 +46,10 @@ enum DownloadCommand {
         /// Also download assets references (images, meshes, mesh parts, audios, videos, animations)
         #[arg(short, long)]
         references: bool,
+
+        /// The number of concurrent downloads to perform
+        #[arg(short, long, default_value_t = 10)]
+        concurrent: usize,
     },
 }
 
@@ -73,6 +77,7 @@ pub(crate) async fn run() -> Result<(), Error> {
                 place_id,
                 output_dir,
                 references,
+                concurrent,
             } => {
                 download(
                     progress,
@@ -81,6 +86,7 @@ pub(crate) async fn run() -> Result<(), Error> {
                     DownloadType::Place,
                     place_id,
                     references,
+                    concurrent,
                 )
                 .await
             }

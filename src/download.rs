@@ -1,6 +1,14 @@
-use std::{path::Path, time::Duration};
+use std::{
+    fmt::Write,
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Error, Result, anyhow, bail};
 use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
 use log::{debug, warn};
 use tokio::{
@@ -75,6 +83,7 @@ pub async fn download(
     download_type: DownloadType,
     place_id: u64,
     references: bool,
+    concurrent: usize,
 ) -> Result<()> {
     let introspect = client
         .introspect()
@@ -168,8 +177,8 @@ pub async fn download(
             }
 
             eprintln!("Beginning download for place {place_id} to `{output_dir}`");
-            let dir_path = Path::new(&output_dir);
-            fs::create_dir_all(dir_path)
+            let dir_path = PathBuf::from(output_dir.clone());
+            fs::create_dir_all(&dir_path)
                 .await
                 .context(format!("Failed to create {output_dir}"))?;
 
@@ -177,41 +186,68 @@ pub async fn download(
                 ProgressBar::new(versions as u64)
                     .with_style(
                         ProgressStyle::with_template(
-                            "[{elapsed_precise}] [{bar:30.cyan/blue}] {pos}/{len} ({eta}) • {msg}",
+                            "[{elapsed_precise}] [{bar:30.cyan/blue}] {pos}/{len} ({eta}) • Downloading {per_sec}",
                         )
-                        .unwrap(),
+                        .unwrap().with_key("per_sec", |state: &indicatif::ProgressState, w: &mut dyn Write| write!(w, "{:.2} ver/s", state.per_sec()).unwrap()),
                     )
                     .with_finish(ProgressFinish::AndClear),
             );
-            let file_bar = progress.add(ProgressBar::new_spinner());
-            for place_version in place_versions.iter().rev() {
-                let version: u64 = place_version.version.parse().context("Malformed version")?;
-                bar.inc(1);
-                message!(
-                    bar,
-                    "Downloading version {} at {:.2} ver/sec",
-                    version,
-                    bar.per_sec()
-                );
-                let delivery_response = client
-                    .asset_version_delivery(place_id, version)
-                    .await
-                    .context(format!(
-                        "Failed to get asset delivery url for version {version}"
-                    ))?;
-                debug!("Got delivery URL for version {version}, starting download",);
-                let file_path = Path::join(
-                    dir_path,
-                    format!("v{version:0width$}.rbxl", width = version_padding),
-                );
-                download_to_file(&file_bar, &client, delivery_response, &file_path).await?;
-                progress.print(format!(
-                    "Downloaded version {} to `{}`",
-                    version,
-                    file_path.display()
-                ));
+
+            let concurrent = concurrent.min(versions);
+            let mut handles = Vec::new();
+            let progress = Arc::new(progress);
+            let next_version = Arc::new(AtomicUsize::new(1));
+            let bar = Arc::new(bar);
+            let client = Arc::new(client);
+            let dir_path = Arc::new(dir_path);
+            for _ in 0..concurrent {
+                let progress = Arc::clone(&progress);
+                let next_version = Arc::clone(&next_version);
+                let bar = Arc::clone(&bar);
+                let client = Arc::clone(&client);
+                let dir_path = Arc::clone(&dir_path);
+
+                let handle = tokio::spawn(async move {
+                    let file_bar = progress
+                        .add(ProgressBar::new_spinner().with_finish(ProgressFinish::AndClear));
+                    loop {
+                        // Ordering does not matter, but we need to have one thread do change at a time
+                        let version = next_version.fetch_add(1, Ordering::Relaxed);
+                        if version > versions {
+                            // No more work to do
+                            break;
+                        }
+
+                        debug!("Downloading version {version}");
+                        let delivery_response = client
+                            .asset_version_delivery(place_id, version as u64)
+                            .await
+                            .context(format!(
+                                "Failed to get asset delivery url for version {version}"
+                            ))?;
+                        debug!("Got delivery URL for version {version}, starting download",);
+                        let file_path = Path::join(
+                            &dir_path,
+                            format!("v{version:0width$}.rbxl", width = version_padding),
+                        );
+                        download_to_file(&file_bar, &client, delivery_response, &file_path).await?;
+                        bar.inc(1);
+                        progress.print(format!(
+                            "Downloaded version {} to `{}`",
+                            version,
+                            file_path.display()
+                        ));
+                    }
+
+                    Ok::<(), Error>(())
+                });
+
+                handles.push(handle);
             }
-            file_bar.finish_and_clear();
+
+            for handle in handles {
+                handle.await??
+            }
 
             eprintln!("Downloaded {versions} versions to `{output_dir}`")
         }
