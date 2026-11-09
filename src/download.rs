@@ -100,8 +100,15 @@ pub async fn download(
     }
 
     debug!(
-        "API key `{}` owned by {} validated, scopes: {:#?}",
-        introspect.name, introspect.authorized_user_id, introspect.scopes
+        "API key `{}` owned by {} validated, scopes: {}",
+        introspect.name,
+        introspect.authorized_user_id,
+        introspect
+            .scopes
+            .iter()
+            .map(|scope| scope.to_string())
+            .collect::<Vec<_>>()
+            .join(", "),
     );
 
     match download_type {

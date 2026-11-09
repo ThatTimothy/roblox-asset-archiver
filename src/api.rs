@@ -99,6 +99,32 @@ pub struct IntrospectScope {
     pub user_ids: Vec<String>,
 }
 
+impl Display for IntrospectScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let scoped_on = self
+            .group_ids
+            .iter()
+            .map(|group_id| format!("group {group_id}"))
+            .chain(
+                self.user_ids
+                    .iter()
+                    .map(|user_id| format!("user {user_id}")),
+            )
+            .collect::<Vec<_>>();
+        write!(
+            f,
+            "{}:{}({})",
+            self.name,
+            self.operations.join("|"),
+            if scoped_on.is_empty() {
+                "all".to_owned()
+            } else {
+                scoped_on.join(", ")
+            },
+        )
+    }
+}
+
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct IntrospectResponse {
