@@ -1,11 +1,14 @@
-use anyhow::Error;
+use std::path::PathBuf;
+
+use anyhow::{Context, Error, bail};
 use clap::{ArgAction, Parser, Subcommand};
 use log::LevelFilter;
 
 use crate::{
     api::Client,
-    download::{DownloadType, download},
+    download::download,
     progress::Progress,
+    state::{State, StateType},
 };
 
 /// A simple CLI tool to back up and archive every asset (games, places, models, images, passes, etc) on Roblox into a Rojo-compatible Git repository
@@ -51,6 +54,26 @@ enum DownloadCommand {
         #[arg(short, long, default_value_t = 10)]
         concurrent: usize,
     },
+
+    /// Resumes a download of any type
+    Resume {
+        // The directory passed on previous download (should exist)
+        #[arg(name = "output")]
+        output_dir: String,
+
+        /// The number of concurrent downloads to perform
+        #[arg(short, long, default_value_t = 10)]
+        concurrent: usize,
+    },
+}
+
+impl DownloadCommand {
+    pub fn output(&self) -> String {
+        match self {
+            DownloadCommand::Place { output_dir, .. } => output_dir.to_owned(),
+            DownloadCommand::Resume { output_dir, .. } => output_dir.to_owned(),
+        }
+    }
 }
 
 pub(crate) async fn run() -> Result<(), Error> {
@@ -72,24 +95,49 @@ pub(crate) async fn run() -> Result<(), Error> {
     let client = Client::new(args.api_key);
 
     match args.command {
-        Command::Download(command) => match command {
-            DownloadCommand::Place {
-                place_id,
-                output_dir,
-                references,
-                concurrent,
-            } => {
-                download(
-                    progress,
-                    client,
-                    output_dir,
-                    DownloadType::Place,
+        Command::Download(command) => {
+            let dir_path = PathBuf::from(command.output());
+            let existing_state = State::load(&dir_path).context("Failed to load state")?;
+
+            match command {
+                DownloadCommand::Place {
                     place_id,
+                    output_dir,
                     references,
                     concurrent,
-                )
-                .await
+                } => {
+                    if existing_state.is_some() {
+                        bail!(
+                            "Existing state file found - did you mean to do `{} download resume`?",
+                            env!("CARGO_BIN_NAME")
+                        )
+                    }
+                    if dir_path.exists() && !dir_path.is_empty() {
+                        bail!("Cannot download to non-empty directory `{output_dir}`");
+                    }
+
+                    download(
+                        progress,
+                        client,
+                        output_dir,
+                        State::new(StateType::Place, place_id, references),
+                        concurrent,
+                    )
+                    .await
+                }
+                DownloadCommand::Resume {
+                    output_dir,
+                    concurrent,
+                } => match existing_state {
+                    None => {
+                        bail!(
+                            "Cannot resume - state file `{}` not found",
+                            State::STATE_FILENAME
+                        );
+                    }
+                    Some(state) => download(progress, client, output_dir, state, concurrent).await,
+                },
             }
-        },
+        }
     }
 }

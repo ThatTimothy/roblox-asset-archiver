@@ -156,7 +156,7 @@ pub struct Universe {
     pub group: Option<String>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct Place {
     /// Full path containing universe_id and place_id: `universes/{universe_id}/places/{place_id}`
@@ -168,7 +168,19 @@ pub struct Place {
     pub server_size: u64,
 }
 
-#[derive(Deserialize, Debug)]
+impl Place {
+    /// Parses universe_id from [Place::path]
+    pub fn universe_id(&self) -> u64 {
+        self.path
+            .split("/")
+            .nth(1)
+            .expect("Malformed place path")
+            .parse()
+            .expect("Malformed place path")
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct PlaceVersion {
     pub version: String,

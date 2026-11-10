@@ -6,6 +6,7 @@ mod api;
 mod cli;
 mod download;
 mod progress;
+mod state;
 
 #[tokio::main]
 async fn main() {
