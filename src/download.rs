@@ -23,6 +23,41 @@ use crate::{
 };
 
 const TEMP_FILE_EXTENSION: &str = "temp";
+
+// Figures out min and max version by args, rejecting invalid combinations
+fn min_max_version(
+    min: Option<i64>,
+    max: Option<i64>,
+    num_versions: usize,
+) -> Result<(usize, usize)> {
+    let resolve = |arg| match arg {
+        Some(arg) if arg == 0 => None,
+        Some(arg) if arg > 0 => Some(arg),
+        Some(arg) => Some(num_versions as i64 + arg + 1),
+        None => None,
+    };
+    let min_version = resolve(min).unwrap_or(1);
+    let max_version = resolve(max).unwrap_or(num_versions as i64);
+
+    if min_version > max_version {
+        bail!(
+            "Min version cannot be greater than max version (min = {min_version}, max = {max_version})"
+        );
+    }
+
+    if min_version < 1 {
+        bail!("Min version cannot be below 1 (min = {min_version}, max = {max_version})");
+    }
+
+    if max_version > num_versions as i64 {
+        bail!(
+            "Max version cannot be above num_versions={num_versions} (min = {min_version}, max = {max_version})"
+        );
+    }
+
+    Ok((min_version as usize, max_version as usize))
+}
+
 /// Downloads to a file by streaming response into it
 async fn download_to_file<P: AsRef<Path>>(
     bar: &ProgressBar,
@@ -102,6 +137,8 @@ pub async fn download_place(
     client: Client,
     output_dir: String,
     mut state: State,
+    min: Option<i64>,
+    max: Option<i64>,
     concurrent: usize,
 ) -> Result<()> {
     let State {
@@ -233,8 +270,11 @@ pub async fn download_place(
     }
 
     // Only download files which do not already exists
+    let num_versions = state_versions.len();
+    let (min, max) = min_max_version(min, max, num_versions)?;
+    let num_selected = max - min + 1;
     let mut to_download = Vec::new();
-    for state_version in state_versions {
+    for state_version in state_versions.iter().skip(min - 1).take(num_selected) {
         let file_path = Path::join(&dir_path, state_version.filename.clone());
         if !file_path.exists() {
             to_download.push((
@@ -245,7 +285,6 @@ pub async fn download_place(
     }
     trace!("To download: {:?}", to_download);
 
-    let num_versions = state_versions.len();
     let num_to_download = to_download.len();
 
     if num_to_download == 0 {
@@ -260,7 +299,7 @@ pub async fn download_place(
     }
 
     let bar = progress.add(
-                ProgressBar::new(num_versions as u64)
+                ProgressBar::new(num_selected as u64)
                     .with_style(
                         ProgressStyle::with_template(
                             "[{elapsed_precise}] [{bar:30.cyan/blue}] {pos}/{len} ({eta}) • Downloading {per_sec}",
@@ -269,7 +308,7 @@ pub async fn download_place(
                     )
                     .with_finish(ProgressFinish::AndClear),
             );
-    bar.set_position((num_versions - num_to_download) as u64);
+    bar.set_position((num_selected - num_to_download) as u64);
 
     let concurrent = concurrent.min(num_to_download);
     let mut handles = Vec::new();
@@ -324,7 +363,7 @@ pub async fn download_place(
         handle.await??
     }
 
-    eprintln!("Downloaded {num_versions} versions to `{output_dir}`");
+    eprintln!("Downloaded {num_selected} versions to `{output_dir}`");
 
     Ok(())
 }
@@ -334,6 +373,8 @@ pub async fn download(
     client: Client,
     output_dir: String,
     state: State,
+    min: Option<i64>,
+    max: Option<i64>,
     concurrent: usize,
 ) -> Result<()> {
     let introspect = client
@@ -361,7 +402,9 @@ pub async fn download(
     );
 
     match state.state_type {
-        StateType::Place => download_place(progress, client, output_dir, state, concurrent),
+        StateType::Place => {
+            download_place(progress, client, output_dir, state, min, max, concurrent)
+        }
     }
     .await
 }

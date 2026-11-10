@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Error, bail};
-use clap::{ArgAction, Parser, Subcommand};
+use clap::{ArgAction, Args, Parser, Subcommand};
 use log::LevelFilter;
 
 use crate::{
@@ -14,13 +14,13 @@ use crate::{
 /// A simple CLI tool to back up and archive every asset (games, places, models, images, passes, etc) on Roblox into a Rojo-compatible Git repository
 #[derive(Parser, Debug)]
 #[command(version, about)]
-struct Args {
+struct CliArgs {
     /// Open Cloud API key (create at https://create.roblox.com/dashboard/credentials)
     #[arg(long, env = "ROBLOX_API_KEY", hide_env_values = true)]
     api_key: String,
 
     /// Increase log level (default info, -v debug, -vv trace)
-    #[arg(short, long, action = ArgAction::Count, global = true)]
+    #[arg(short, long, action = ArgAction::Count, global = true, display_order = 100)]
     verbose: u8,
 
     #[command(subcommand)]
@@ -32,6 +32,21 @@ enum Command {
     /// Download all versions of an asset & associated content
     #[command(subcommand)]
     Download(DownloadCommand),
+}
+
+#[derive(Args, Debug)]
+struct DownloadOptions {
+    /// The minimum version to fetch (negative values mean from the most recent; -1 is the latest, -2 is the previous version, 10 is version 10, default 1)
+    #[arg(long, allow_hyphen_values = true)]
+    min: Option<i64>,
+
+    /// The maximum version to fetch (negative values mean from the most recent; -1 is the latest, -2 is the previous version, 10 is version 10, default latest version)
+    #[arg(long, allow_hyphen_values = true)]
+    max: Option<i64>,
+
+    /// The number of concurrent downloads to perform
+    #[arg(short, long, default_value_t = 8)]
+    concurrent: usize,
 }
 
 #[derive(Subcommand, Debug)]
@@ -50,9 +65,8 @@ enum DownloadCommand {
         #[arg(short, long)]
         references: bool,
 
-        /// The number of concurrent downloads to perform
-        #[arg(short, long, default_value_t = 8)]
-        concurrent: usize,
+        #[command(flatten)]
+        options: DownloadOptions,
     },
 
     /// Resumes a download of any type
@@ -61,9 +75,8 @@ enum DownloadCommand {
         #[arg(name = "output")]
         output_dir: String,
 
-        /// The number of concurrent downloads to perform
-        #[arg(short, long, default_value_t = 8)]
-        concurrent: usize,
+        #[command(flatten)]
+        options: DownloadOptions,
     },
 }
 
@@ -77,7 +90,7 @@ impl DownloadCommand {
 }
 
 pub(crate) async fn run() -> Result<(), Error> {
-    let args = Args::parse();
+    let args = CliArgs::parse();
     let logger = env_logger::builder()
         .filter_module(
             env!("CARGO_CRATE_NAME"),
@@ -104,7 +117,12 @@ pub(crate) async fn run() -> Result<(), Error> {
                     place_id,
                     output_dir,
                     references,
-                    concurrent,
+                    options:
+                        DownloadOptions {
+                            min,
+                            max,
+                            concurrent,
+                        },
                 } => {
                     if existing_state.is_some() {
                         bail!(
@@ -121,13 +139,20 @@ pub(crate) async fn run() -> Result<(), Error> {
                         client,
                         output_dir,
                         State::new(StateType::Place, place_id, references),
+                        min,
+                        max,
                         concurrent,
                     )
                     .await
                 }
                 DownloadCommand::Resume {
                     output_dir,
-                    concurrent,
+                    options:
+                        DownloadOptions {
+                            min,
+                            max,
+                            concurrent,
+                        },
                 } => match existing_state {
                     None => {
                         bail!(
@@ -135,7 +160,9 @@ pub(crate) async fn run() -> Result<(), Error> {
                             State::STATE_FILENAME
                         );
                     }
-                    Some(state) => download(progress, client, output_dir, state, concurrent).await,
+                    Some(state) => {
+                        download(progress, client, output_dir, state, min, max, concurrent).await
+                    }
                 },
             }
         }
