@@ -51,7 +51,7 @@ enum DownloadCommand {
         references: bool,
 
         /// The number of concurrent downloads to perform
-        #[arg(short, long, default_value_t = 10)]
+        #[arg(short, long, default_value_t = 8)]
         concurrent: usize,
     },
 
@@ -62,7 +62,7 @@ enum DownloadCommand {
         output_dir: String,
 
         /// The number of concurrent downloads to perform
-        #[arg(short, long, default_value_t = 10)]
+        #[arg(short, long, default_value_t = 8)]
         concurrent: usize,
     },
 }

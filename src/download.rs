@@ -13,7 +13,7 @@ use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
 use log::{debug, trace, warn};
 use tokio::{
     fs::{self, File},
-    io::AsyncWriteExt,
+    io::{AsyncWriteExt, BufWriter},
 };
 
 use crate::{
@@ -74,10 +74,11 @@ async fn download_to_file<P: AsRef<Path>>(
         extension
     });
     debug!("Start streaming content to `{}`", temp_path.display());
-    let mut file = File::create(&temp_path).await?;
+    let file = File::create(&temp_path).await?;
+    let mut writer = BufWriter::new(file);
     while let Some(item) = response.chunk().await? {
         bar.inc(item.len() as u64);
-        file.write_all(&item).await?;
+        writer.write_all(&item).await?;
     }
     debug!("Streamed content to {}", &temp_path.display());
     fs::rename(&temp_path, &path).await.with_context(|| {
