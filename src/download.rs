@@ -80,6 +80,7 @@ async fn download_to_file<P: AsRef<Path>>(
         bar.inc(item.len() as u64);
         writer.write_all(&item).await?;
     }
+    writer.flush().await?;
     debug!("Streamed content to {}", &temp_path.display());
     fs::rename(&temp_path, &path).await.with_context(|| {
         format!(

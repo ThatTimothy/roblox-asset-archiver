@@ -1,6 +1,6 @@
 use std::{
     fs::{self, File},
-    io::{BufReader, BufWriter},
+    io::{BufReader, BufWriter, Write},
     path::Path,
 };
 
@@ -87,9 +87,12 @@ impl State {
         fs::create_dir_all(&dir).with_context(|| format!("Failed to create {}", dir.display()))?;
         let file = File::create(&temp_state_path)
             .with_context(|| format!("Failed to open `{}`", &temp_state_path.display()))?;
-        let writer = BufWriter::new(file);
-        serde_json::to_writer(writer, &self)
+        let mut writer = BufWriter::new(file);
+        serde_json::to_writer(&mut writer, &self)
             .with_context(|| format!("Failed to save to `{}`", &temp_state_path.display()))?;
+        writer
+            .flush()
+            .with_context(|| format!("Failed to flush to `{}`", &temp_state_path.display()))?;
         fs::rename(&temp_state_path, &state_path).with_context(|| {
             format!(
                 "Failed to commit by renaming `{}` to `{}`",
