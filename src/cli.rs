@@ -57,8 +57,7 @@ enum DownloadCommand {
         id: u64,
 
         // The directory to output downloads (will be created)
-        #[arg(name = "output")]
-        output_dir: String,
+        output: PathBuf,
 
         /// Also download assets references (images, meshes, mesh parts, audios, videos, animations)
         #[arg(short, long)]
@@ -71,8 +70,7 @@ enum DownloadCommand {
     /// Resumes a download of any type
     Resume {
         // The directory passed on previous download (should exist)
-        #[arg(name = "output")]
-        output_dir: String,
+        output: PathBuf,
 
         #[command(flatten)]
         options: DownloadOptions,
@@ -80,10 +78,10 @@ enum DownloadCommand {
 }
 
 impl DownloadCommand {
-    pub fn output(&self) -> String {
+    pub fn output(&self) -> &PathBuf {
         match self {
-            DownloadCommand::Place { output_dir, .. } => output_dir.to_owned(),
-            DownloadCommand::Resume { output_dir, .. } => output_dir.to_owned(),
+            DownloadCommand::Place { output, .. } => output,
+            DownloadCommand::Resume { output, .. } => output,
         }
     }
 }
@@ -108,13 +106,12 @@ pub(crate) async fn run() -> Result<(), Error> {
 
     match args.command {
         Command::Download(command) => {
-            let dir_path = PathBuf::from(command.output());
-            let existing_state = State::load(&dir_path).context("Failed to load state")?;
+            let existing_state = State::load(&command.output()).context("Failed to load state")?;
 
             match command {
                 DownloadCommand::Place {
                     id,
-                    output_dir,
+                    output,
                     references,
                     options:
                         DownloadOptions {
@@ -131,7 +128,7 @@ pub(crate) async fn run() -> Result<(), Error> {
                             return download(
                                 progress,
                                 client,
-                                output_dir,
+                                output,
                                 existing_state,
                                 min,
                                 max,
@@ -145,14 +142,17 @@ pub(crate) async fn run() -> Result<(), Error> {
                         )
                     }
 
-                    if dir_path.exists() && !dir_path.is_empty() {
-                        bail!("Cannot download to non-empty directory `{output_dir}`");
+                    if output.exists() && !output.is_empty() {
+                        bail!(
+                            "Cannot download to non-empty directory `{}`",
+                            output.display()
+                        );
                     }
 
                     download(
                         progress,
                         client,
-                        output_dir,
+                        output,
                         State::new(StateType::Place, id, references),
                         min,
                         max,
@@ -161,7 +161,7 @@ pub(crate) async fn run() -> Result<(), Error> {
                     .await
                 }
                 DownloadCommand::Resume {
-                    output_dir,
+                    output,
                     options:
                         DownloadOptions {
                             min,
@@ -176,7 +176,7 @@ pub(crate) async fn run() -> Result<(), Error> {
                         );
                     }
                     Some(state) => {
-                        download(progress, client, output_dir, state, min, max, concurrent).await
+                        download(progress, client, output, state, min, max, concurrent).await
                     }
                 },
             }

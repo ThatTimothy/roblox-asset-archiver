@@ -135,7 +135,7 @@ async fn download_to_file<P: AsRef<Path>>(
 pub async fn download_place(
     progress: Progress,
     client: Client,
-    output_dir: String,
+    output: PathBuf,
     mut state: State,
     min: Option<i64>,
     max: Option<i64>,
@@ -147,7 +147,7 @@ pub async fn download_place(
         ..
     } = state;
 
-    let dir_path = PathBuf::from(output_dir.clone());
+    let output = PathBuf::from(output.clone());
     let spinner = progress.add(
         ProgressBar::new_spinner()
             .with_style(ProgressStyle::with_template("{spinner:.blue} {msg}").unwrap()),
@@ -158,7 +158,8 @@ pub async fn download_place(
         None => {
             // If place not defined, haven't started a download before
             eprintln!(
-                "Preparing download for place {place_id} to `{output_dir}` with references={references}"
+                "Preparing download for place {place_id} to `{}` with references={references}",
+                output.display()
             );
             // We fetch universe_id then place so we can validate the place exists
             message!(spinner, "Getting universe id for place {place_id}");
@@ -184,14 +185,15 @@ pub async fn download_place(
 
             // Update and save state
             state.place = Some(place);
-            state.save(&dir_path).context("Failed to save state")?;
+            state.save(&output).context("Failed to save state")?;
         }
         Some(place) => {
             // If it is defined, we're resuming a download
             let universe_id = place.universe_id();
             eprintln!(
-                "Resuming download for place {place_id} in {universe_id}: `{}` to `{output_dir}` with references={references}",
-                place.display_name
+                "Resuming download for place {place_id} in {universe_id}: `{}` to `{}` with references={references}",
+                place.display_name,
+                output.display()
             );
         }
     };
@@ -252,13 +254,13 @@ pub async fn download_place(
                 })
                 .collect(),
         );
-        state.save(&dir_path).context("Failed to save state")?;
+        state.save(&output).context("Failed to save state")?;
     }
     let state_versions = state.versions.as_ref().unwrap();
     spinner.finish_and_clear();
 
     // Remove temp files
-    for entry in dir_path.read_dir()? {
+    for entry in output.read_dir()? {
         if let Ok(entry) = entry
             && let Some(extension) = entry.path().extension()
             && extension == TEMP_FILE_EXTENSION
@@ -275,7 +277,7 @@ pub async fn download_place(
     let num_selected = max - min + 1;
     let mut to_download = Vec::new();
     for state_version in state_versions.iter().skip(min - 1).take(num_selected) {
-        let file_path = Path::join(&dir_path, state_version.filename.clone());
+        let file_path = Path::join(&output, state_version.filename.clone());
         if !file_path.exists() {
             to_download.push((
                 state_version.metadata.version.parse::<u64>().unwrap(),
@@ -295,7 +297,10 @@ pub async fn download_place(
     // If we already have version metadata, we already logged we are resuming so this message is redundant
     // Otherwise marks next phase
     if !have_version_metadata {
-        eprintln!("Beginning download for place {place_id} to `{output_dir}`");
+        eprintln!(
+            "Beginning download for place {place_id} to `{}`",
+            output.display()
+        );
     }
 
     let bar = progress.add(
@@ -363,7 +368,10 @@ pub async fn download_place(
         handle.await??
     }
 
-    eprintln!("Downloaded {num_selected} versions to `{output_dir}`");
+    eprintln!(
+        "Downloaded {num_selected} versions to `{}`",
+        output.display()
+    );
 
     Ok(())
 }
@@ -371,7 +379,7 @@ pub async fn download_place(
 pub async fn download(
     progress: Progress,
     client: Client,
-    output_dir: String,
+    output: PathBuf,
     state: State,
     min: Option<i64>,
     max: Option<i64>,
@@ -402,9 +410,7 @@ pub async fn download(
     );
 
     match state.state_type {
-        StateType::Place => {
-            download_place(progress, client, output_dir, state, min, max, concurrent)
-        }
+        StateType::Place => download_place(progress, client, output, state, min, max, concurrent),
     }
     .await
 }
