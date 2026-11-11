@@ -54,8 +54,7 @@ enum DownloadCommand {
     /// Downloads all versions of place
     Place {
         /// The id of the place to download (roblox.com/games/id)
-        #[arg(name = "id")]
-        place_id: u64,
+        id: u64,
 
         // The directory to output downloads (will be created)
         #[arg(name = "output")]
@@ -114,7 +113,7 @@ pub(crate) async fn run() -> Result<(), Error> {
 
             match command {
                 DownloadCommand::Place {
-                    place_id,
+                    id,
                     output_dir,
                     references,
                     options:
@@ -138,7 +137,7 @@ pub(crate) async fn run() -> Result<(), Error> {
                         progress,
                         client,
                         output_dir,
-                        State::new(StateType::Place, place_id, references),
+                        State::new(StateType::Place, id, references),
                         min,
                         max,
                         concurrent,
