@@ -56,8 +56,8 @@ enum DownloadCommand {
         /// The id of the place to download (roblox.com/games/id)
         id: u64,
 
-        // The directory to output downloads (will be created)
-        output: PathBuf,
+        /// The directory to output downloads (will be created, if not passed defaults to place_{id})
+        output: Option<PathBuf>,
 
         /// Also download assets references (images, meshes, mesh parts, audios, videos, animations)
         #[arg(short, long)]
@@ -69,8 +69,8 @@ enum DownloadCommand {
 
     /// Resumes a download of any type
     Resume {
-        // The directory passed on previous download (should exist)
-        output: PathBuf,
+        /// The directory passed on previous download (if not passed, scans in current directory)
+        output: Option<PathBuf>,
 
         #[command(flatten)]
         options: DownloadOptions,
@@ -78,7 +78,7 @@ enum DownloadCommand {
 }
 
 impl DownloadCommand {
-    pub fn output(&self) -> &PathBuf {
+    pub fn output(&self) -> &Option<PathBuf> {
         match self {
             DownloadCommand::Place { output, .. } => output,
             DownloadCommand::Resume { output, .. } => output,
@@ -106,12 +106,48 @@ pub(crate) async fn run() -> Result<(), Error> {
 
     match args.command {
         Command::Download(command) => {
-            let existing_state = State::load(&command.output()).context("Failed to load state")?;
+            // Determine output location (if not passed)
+            let output = match command.output() {
+                Some(output) => output.clone(),
+                None => match &command {
+                    DownloadCommand::Resume { .. } => {
+                        // Scan cwd
+                        let mut possible = Vec::new();
+                        let scan = PathBuf::from(".");
+                        for entry in scan.read_dir().context("Failed to scan directory")? {
+                            if let Ok(entry) = entry
+                                && let Ok(metadata) = entry.metadata()
+                                && metadata.is_dir()
+                                && let path = entry.path()
+                                && path.join(State::STATE_FILENAME).exists()
+                            {
+                                possible.push(path);
+                            }
+                        }
+
+                        match possible.len() {
+                            0 => bail!(
+                                "Scanned current directory and found resumption targets - try passing [output] directly"
+                            ),
+                            1 => possible.remove(0),
+                            _ => bail!(
+                                "Scanned current directory and found multiple resumption targets: {} - pass [output] to select one",
+                                possible
+                                    .iter()
+                                    .map(|p| p.display().to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ),
+                        }
+                    }
+                    DownloadCommand::Place { id, .. } => PathBuf::from(format!("place_{id}")),
+                },
+            };
+            let existing_state = State::load(&output).context("Failed to load state")?;
 
             match command {
                 DownloadCommand::Place {
                     id,
-                    output,
                     references,
                     options:
                         DownloadOptions {
@@ -119,6 +155,7 @@ pub(crate) async fn run() -> Result<(), Error> {
                             max,
                             concurrent,
                         },
+                    ..
                 } => {
                     if let Some(existing_state) = existing_state {
                         if existing_state.state_type == StateType::Place
@@ -161,13 +198,13 @@ pub(crate) async fn run() -> Result<(), Error> {
                     .await
                 }
                 DownloadCommand::Resume {
-                    output,
                     options:
                         DownloadOptions {
                             min,
                             max,
                             concurrent,
                         },
+                    ..
                 } => match existing_state {
                     None => {
                         bail!(
