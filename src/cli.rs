@@ -123,12 +123,28 @@ pub(crate) async fn run() -> Result<(), Error> {
                             concurrent,
                         },
                 } => {
-                    if existing_state.is_some() {
+                    if let Some(existing_state) = existing_state {
+                        if existing_state.state_type == StateType::Place
+                            && existing_state.id == id
+                            && existing_state.references == references
+                        {
+                            return download(
+                                progress,
+                                client,
+                                output_dir,
+                                existing_state,
+                                min,
+                                max,
+                                concurrent,
+                            )
+                            .await;
+                        }
                         bail!(
                             "Existing state file found - did you mean to do `{} download resume`?",
                             env!("CARGO_BIN_NAME")
                         )
                     }
+
                     if dir_path.exists() && !dir_path.is_empty() {
                         bail!("Cannot download to non-empty directory `{output_dir}`");
                     }

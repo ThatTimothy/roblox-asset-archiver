@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::{Place, PlaceVersion};
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, PartialEq, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub enum StateType {
     Place,
