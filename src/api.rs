@@ -585,7 +585,7 @@ impl Client {
 
             next_cursor = result.next_cursor.clone();
 
-            if next_cursor == None || next_cursor.clone().unwrap().is_empty() {
+            if !result.has_more {
                 break;
             }
         }
