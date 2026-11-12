@@ -7,19 +7,35 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::api::{Place, PlaceVersion};
+use crate::api::{Asset, AssetVersion, PlaceVersion};
 
 #[derive(Serialize, Deserialize, PartialEq, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub enum StateType {
     Place,
+    Model,
+}
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub enum StateVersionMetadata {
+    Place(PlaceVersion),
+    Asset(AssetVersion),
+}
+
+impl StateVersionMetadata {
+    pub fn version(&self) -> u64 {
+        match self {
+            Self::Place(place_version) => place_version.version(),
+            Self::Asset(asset_version) => asset_version.version(),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct StateVersion {
     pub version: u64,
-    pub metadata: PlaceVersion,
+    pub metadata: StateVersionMetadata,
     pub filename: String,
 }
 
@@ -31,7 +47,8 @@ pub struct State {
     schema_version: String,
     pub id: u64,
     pub references: bool,
-    pub place: Option<Place>,
+    pub universe_id: Option<u64>,
+    pub asset: Option<Asset>,
     pub versions: Option<Vec<StateVersion>>,
 }
 
@@ -45,7 +62,8 @@ impl State {
             schema_version: Self::STATE_SCHEMA_VERSION.to_owned(),
             id,
             references,
-            place: None,
+            universe_id: None,
+            asset: None,
             versions: None,
         }
     }

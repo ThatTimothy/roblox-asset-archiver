@@ -182,6 +182,62 @@ impl Place {
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
+pub struct AssetCreationContextCreator {
+    #[serde(default)]
+    pub user_id: Option<String>,
+    #[serde(default)]
+    pub group_id: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct AssetCreationContext {
+    pub asset_privacy: Option<String>,
+    pub creator: AssetCreationContextCreator,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct AssetModerationResult {
+    pub moderation_state: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct AssetPreview {
+    pub asset: String,
+    pub alt_text: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct AssetSocialLink {
+    pub title: String,
+    pub uri: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Asset {
+    pub asset_type: String,
+    pub asset_id: String,
+    pub creation_context: AssetCreationContext,
+    pub description: Option<String>,
+    pub display_name: String,
+    /// Full path containing asset_id: `assets/{asset_id}`
+    pub path: String,
+    pub revision_id: String,
+    pub revision_create_time: String,
+    pub moderation_result: AssetModerationResult,
+    pub is_published: Option<bool>,
+    pub icon: Option<String>,
+    pub previews: Option<Vec<AssetPreview>>,
+    pub state: String,
+    pub social_link: Option<Vec<AssetSocialLink>>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct PlaceVersion {
     pub version: String,
     pub title: Option<String>,
@@ -193,6 +249,11 @@ pub struct PlaceVersion {
     pub has_notes: bool,
     pub created_time: String,
     pub created_by: Option<u64>,
+}
+impl PlaceVersion {
+    pub fn version(&self) -> u64 {
+        self.version.parse().expect("Malformed version")
+    }
 }
 
 #[derive(Deserialize, Debug)]
@@ -218,36 +279,25 @@ pub struct AssetDeliveryResponse {
     pub asset_metadatas: Option<Vec<AssetDeliveryMetadata>>,
 }
 
-#[derive(Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct AssetVersionCreator {
-    #[serde(default)]
-    pub user_id: Option<String>,
-    #[serde(default)]
-    pub group_id: Option<String>,
-}
-
-#[derive(Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct AssetVersionCreationContext {
-    pub asset_privacy: Option<String>,
-    pub creator: AssetVersionCreator,
-}
-
-#[derive(Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct AssetVersionModerationResult {
-    pub moderation_state: String,
-}
-
-#[derive(Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct AssetVersion {
-    pub creation_context: AssetVersionCreationContext,
+    pub creation_context: AssetCreationContext,
+    /// Full path containing asset_id: `assets/{asset_id}/versions/{version}`
     pub path: String,
-    pub moderation_result: AssetVersionModerationResult,
+    pub moderation_result: AssetModerationResult,
     pub create_time: String,
     pub published: Option<bool>,
+}
+
+impl AssetVersion {
+    pub fn version(&self) -> u64 {
+        self.path
+            .split("/")
+            .nth(3)
+            .and_then(|version| version.parse().ok())
+            .expect("Malformed version path")
+    }
 }
 
 #[derive(Deserialize, Debug)]
@@ -533,15 +583,31 @@ impl Client {
         .await
     }
 
+    /// Gets details for a asset
+    pub async fn asset(&self, asset_id: u64) -> Result<Asset> {
+        self.get(
+            "asset".to_owned(),
+            format!("{API_BASE}/assets/v1/assets/{asset_id}"),
+        )
+        .await
+    }
+
     /// Gets details for a place
     /// Requires no authentication
     /// Docs: https://create.roblox.com/docs/en-us/cloud/reference/features/places#Cloud_GetPlace
     pub async fn place(&self, universe_id: u64, place_id: u64) -> Result<Place> {
-        self.get(
-            "place".to_owned(),
-            format!("{API_BASE}/cloud/v2/universes/{universe_id}/places/{place_id}"),
-        )
-        .await
+        let mut url = Url::parse(&format!(
+            "{API_BASE}/cloud/v2/universes/{universe_id}/places/{place_id}"
+        ))
+        .unwrap();
+        {
+            let mut query = url.query_pairs_mut();
+            query.append_pair(
+                "readMask",
+                "description,isPublished,icon,previews,socialLink",
+            );
+        }
+        self.get("place".to_owned(), url).await
     }
 
     /// Gets a page of versions of an place

@@ -1,3 +1,5 @@
 /target
 /output
+**/roblox-asset-archiver.json
 *.rbxl
+*.rbxm

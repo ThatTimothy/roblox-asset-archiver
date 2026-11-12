@@ -35,18 +35,18 @@ enum Command {
 }
 
 #[derive(Args, Debug)]
-struct DownloadOptions {
+pub struct DownloadOptions {
     /// The minimum version to fetch (negative values mean from the most recent; -1 is the latest, -2 is the previous version, 10 is version 10, default 1)
     #[arg(long, allow_hyphen_values = true)]
-    min: Option<i64>,
+    pub min: Option<i64>,
 
     /// The maximum version to fetch (negative values mean from the most recent; -1 is the latest, -2 is the previous version, 10 is version 10, default latest version)
     #[arg(long, allow_hyphen_values = true)]
-    max: Option<i64>,
+    pub max: Option<i64>,
 
     /// The number of concurrent downloads to perform
     #[arg(short, long, default_value_t = 8)]
-    concurrent: usize,
+    pub concurrent: usize,
 }
 
 #[derive(Subcommand, Debug)]
@@ -57,6 +57,22 @@ enum DownloadCommand {
         id: u64,
 
         /// The directory to output downloads (will be created, if not passed defaults to place_{id})
+        output: Option<PathBuf>,
+
+        /// Also download assets references (images, meshes, mesh parts, audios, videos, animations)
+        #[arg(short, long)]
+        references: bool,
+
+        #[command(flatten)]
+        options: DownloadOptions,
+    },
+
+    /// Downloads all versions of a model
+    Model {
+        /// The id of the model to download
+        id: u64,
+
+        /// The directory to output downloads (will be created, if not passed defaults to model_{id})
         output: Option<PathBuf>,
 
         /// Also download assets references (images, meshes, mesh parts, audios, videos, animations)
@@ -78,9 +94,42 @@ enum DownloadCommand {
 }
 
 impl DownloadCommand {
+    pub fn state_type(&self) -> StateType {
+        match self {
+            DownloadCommand::Place { .. } => StateType::Place,
+            DownloadCommand::Model { .. } => StateType::Model,
+            DownloadCommand::Resume { .. } => panic!("Resume does not have state_type"),
+        }
+    }
+
+    pub fn id(&self) -> u64 {
+        match self {
+            DownloadCommand::Place { id, .. } => *id,
+            DownloadCommand::Model { id, .. } => *id,
+            DownloadCommand::Resume { .. } => panic!("Resume does not have id"),
+        }
+    }
+
+    pub fn references(&self) -> bool {
+        match self {
+            DownloadCommand::Place { references, .. } => *references,
+            DownloadCommand::Model { references, .. } => *references,
+            DownloadCommand::Resume { .. } => panic!("Resume does not have references"),
+        }
+    }
+
+    pub fn options(self) -> DownloadOptions {
+        match self {
+            DownloadCommand::Place { options, .. } => options,
+            DownloadCommand::Model { options, .. } => options,
+            DownloadCommand::Resume { options, .. } => options,
+        }
+    }
+
     pub fn output(&self) -> &Option<PathBuf> {
         match self {
             DownloadCommand::Place { output, .. } => output,
+            DownloadCommand::Model { output, .. } => output,
             DownloadCommand::Resume { output, .. } => output,
         }
     }
@@ -141,37 +190,33 @@ pub(crate) async fn run() -> Result<(), Error> {
                         }
                     }
                     DownloadCommand::Place { id, .. } => PathBuf::from(format!("place_{id}")),
+                    DownloadCommand::Model { id, .. } => PathBuf::from(format!("model_{id}")),
                 },
             };
             let existing_state = State::load(&output).context("Failed to load state")?;
 
             match command {
-                DownloadCommand::Place {
-                    id,
-                    references,
-                    options:
-                        DownloadOptions {
-                            min,
-                            max,
-                            concurrent,
-                        },
-                    ..
-                } => {
+                DownloadCommand::Resume { options, .. } => match existing_state {
+                    None => {
+                        bail!(
+                            "Cannot resume - state file `{}` not found",
+                            State::STATE_FILENAME
+                        );
+                    }
+                    Some(state) => download(progress, client, output, state, options).await,
+                },
+                command => {
+                    let state_type = command.state_type();
+                    let id = command.id();
+                    let references = command.references();
+                    let options = command.options();
                     if let Some(existing_state) = existing_state {
-                        if existing_state.state_type == StateType::Place
+                        if existing_state.state_type == state_type
                             && existing_state.id == id
                             && existing_state.references == references
                         {
-                            return download(
-                                progress,
-                                client,
-                                output,
-                                existing_state,
-                                min,
-                                max,
-                                concurrent,
-                            )
-                            .await;
+                            return download(progress, client, output, existing_state, options)
+                                .await;
                         }
                         bail!(
                             "Existing state file found - did you mean to do `{} download resume`?",
@@ -190,32 +235,11 @@ pub(crate) async fn run() -> Result<(), Error> {
                         progress,
                         client,
                         output,
-                        State::new(StateType::Place, id, references),
-                        min,
-                        max,
-                        concurrent,
+                        State::new(state_type, id, references),
+                        options,
                     )
                     .await
                 }
-                DownloadCommand::Resume {
-                    options:
-                        DownloadOptions {
-                            min,
-                            max,
-                            concurrent,
-                        },
-                    ..
-                } => match existing_state {
-                    None => {
-                        bail!(
-                            "Cannot resume - state file `{}` not found",
-                            State::STATE_FILENAME
-                        );
-                    }
-                    Some(state) => {
-                        download(progress, client, output, state, min, max, concurrent).await
-                    }
-                },
             }
         }
     }

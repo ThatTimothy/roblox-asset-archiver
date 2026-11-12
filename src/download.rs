@@ -18,8 +18,9 @@ use tokio::{
 
 use crate::{
     api::{AssetDeliveryResponse, Client},
+    cli::DownloadOptions,
     progress::{Progress, message},
-    state::{State, StateType, StateVersion},
+    state::{State, StateType, StateVersion, StateVersionMetadata},
 };
 
 const TEMP_FILE_EXTENSION: &str = "temp";
@@ -132,20 +133,14 @@ async fn download_to_file<P: AsRef<Path>>(
     Ok(())
 }
 
-pub async fn download_place(
+pub async fn download_asset(
     progress: Progress,
     client: Client,
     output: PathBuf,
     mut state: State,
-    min: Option<i64>,
-    max: Option<i64>,
-    concurrent: usize,
+    options: DownloadOptions,
 ) -> Result<()> {
-    let State {
-        id: place_id,
-        references,
-        ..
-    } = state;
+    let State { id, references, .. } = state;
 
     let output = PathBuf::from(output.clone());
     let spinner = progress.add(
@@ -154,106 +149,165 @@ pub async fn download_place(
     );
     spinner.enable_steady_tick(Duration::from_millis(100));
 
-    match &state.place {
+    let asset_type = match &state.asset {
         None => {
-            // If place not defined, haven't started a download before
+            // If asset not defined, haven't started a download before
             eprintln!(
-                "Preparing download for place {place_id} to `{}` with references={references}",
+                "Preparing download for {id} to `{}` with references={references}",
                 output.display()
             );
-            // We fetch universe_id then place so we can validate the place exists
-            message!(spinner, "Getting universe id for place {place_id}");
-            let universe_id = async {
-                let response = client.universe_containing_place(place_id).await?;
-                response
-                    .universe_id
-                    .ok_or_else(|| anyhow!("universe_id returned was undefined"))
-            }
-            .await
-            .context("Failed to get universe id for place - make sure the id is correct")?;
-            debug!("Got universe_id={universe_id}");
 
-            message!(spinner, "Fetching place {place_id}");
-            let place = client
-                .place(universe_id, place_id)
+            let universe_id = match state.state_type {
+                StateType::Place => {
+                    // We fetch universe_id to confirm universe exists for places
+                    message!(spinner, "Getting universe id for place {id}");
+                    let universe_id = async {
+                        let response = client.universe_containing_place(id).await?;
+                        response
+                            .universe_id
+                            .ok_or_else(|| anyhow!("universe_id returned was undefined"))
+                    }
+                    .await
+                    .context("Failed to get universe id for place - make sure the id is correct")?;
+                    debug!("Got universe_id={universe_id}");
+                    Some(universe_id)
+                }
+                _ => {
+                    // Otherwise, no universe id
+                    None
+                }
+            };
+
+            message!(spinner, "Fetching {id}");
+            let asset = client
+                .asset(id)
                 .await
                 .context("Failed to fetch place - make sure the id is correct")?;
+            let asset_type = asset.asset_type.to_lowercase();
             progress.print(format!(
-                "Found place {place_id} in universe {universe_id}: `{}`",
-                place.display_name
+                "Found {asset_type} {id}{}: `{}`",
+                match universe_id {
+                    Some(universe_id) => format!(" in universe {universe_id}"),
+                    None => "".to_owned(),
+                },
+                asset.display_name,
             ));
 
             // Update and save state
-            state.place = Some(place);
+            state.universe_id = universe_id;
+            state.asset = Some(asset);
             state.save(&output).context("Failed to save state")?;
+
+            asset_type
         }
-        Some(place) => {
+        Some(asset) => {
             // If it is defined, we're resuming a download
-            let universe_id = place.universe_id();
+            let asset_type = asset.asset_type.to_lowercase();
             eprintln!(
-                "Resuming download for place {place_id} in {universe_id}: `{}` to `{}` with references={references}",
-                place.display_name,
+                "Resuming download for {asset_type} {id}{}: `{}` to `{}` with references={references}",
+                match state.universe_id {
+                    Some(universe_id) => format!(" in universe {universe_id}"),
+                    None => "".to_owned(),
+                },
+                asset.display_name,
                 output.display()
             );
+
+            asset_type
         }
     };
 
     let have_version_metadata = state.versions.is_some();
     if !have_version_metadata {
         // Next step: download version metadata
-        message!(
-            spinner,
-            "Fetching place version metadata for place {place_id}"
-        );
-        let place_versions = client
-            .place_versions(place_id)
-            .await
-            .context("Failed to fetch place versions metadata")?;
-        let version_padding = place_versions.len().to_string().len();
-        progress.print(format!(
-            "Got version metadata for {place_id}: {} versions",
-            place_versions.len()
-        ));
-
-        // Version does not always have creator - this seems to happen with version 1 specifically but generalized here
-        // If the version does not have a creator, the safe default is the first creator in all versions
-        // Since versions are most recent to oldest, we start from back until we find a version that has a creator
-        let first_creator = place_versions
-            .iter()
-            .rev()
-            .find(|place_version| place_version.created_by.is_some())
-            .map(|place_version| place_version.created_by.unwrap());
-        if first_creator.is_none() {
-            warn!("No version exists with a defined creator - creator will not be logged");
-        }
-
-        for place_version in place_versions.iter().rev() {
-            if place_version.created_by.is_none() {
-                warn!(
-                    "Version {} has no defined creator, defaulting to first_creator={}",
-                    place_version.version,
-                    first_creator
-                        .map(|first_creator| first_creator.to_string())
-                        .unwrap_or("None, so will remain undefined".to_owned())
+        let (versions_metadata, extension): (Vec<StateVersionMetadata>, &str) = match state
+            .state_type
+        {
+            StateType::Place => {
+                // Place versions have a special endpoint that includes publish notes
+                message!(
+                    spinner,
+                    "Fetching place version metadata for {asset_type} {id}"
                 );
-            }
-        }
+                let place_versions = client
+                    .place_versions(id)
+                    .await
+                    .context("Failed to fetch place versions metadata")?;
+                progress.print(format!(
+                    "Got place version metadata for {asset_type} {id}: {} versions",
+                    place_versions.len()
+                ));
 
-        // Update and save state
-        state.versions = Some(
-            place_versions
-                .into_iter()
-                .rev()
-                .map(|place_version| {
-                    let version = place_version.version.parse().expect("Malformed version");
-                    StateVersion {
-                        version,
-                        metadata: place_version,
-                        filename: format!("v{version:0version_padding$}.rbxl"),
+                // Version does not always have creator - this seems to happen with version 1 specifically but generalized here
+                // If the version does not have a creator, the safe default is the first creator in all versions
+                // Since versions are most recent to oldest, we start from back until we find a version that has a creator
+                let first_creator = place_versions
+                    .iter()
+                    .rev()
+                    .find(|place_version| place_version.created_by.is_some())
+                    .map(|place_version| place_version.created_by.unwrap());
+                if first_creator.is_none() {
+                    warn!("No version exists with a defined creator - creator will not be logged");
+                }
+
+                for place_version in place_versions.iter().rev() {
+                    if place_version.created_by.is_none() {
+                        warn!(
+                            "Version {} has no defined creator, defaulting to first_creator={}",
+                            place_version.version,
+                            first_creator
+                                .map(|first_creator| first_creator.to_string())
+                                .unwrap_or("None, so will remain undefined".to_owned())
+                        );
                     }
-                })
-                .collect(),
-        );
+                }
+
+                let versions_metadata = place_versions
+                    .into_iter()
+                    .rev()
+                    .map(|place_version| StateVersionMetadata::Place(place_version))
+                    .collect();
+                (versions_metadata, "rbxl")
+            }
+            _ => {
+                // Every other type uses standard asset versions
+                message!(
+                    spinner,
+                    "Fetching asset version metadata for {asset_type} {id}"
+                );
+                let asset_versions = client
+                    .asset_versions(id)
+                    .await
+                    .context("Failed to fetch asset version metadata")?;
+                progress.print(format!(
+                    "Got asset version metadata for {asset_type} {id}: {} versions",
+                    asset_versions.len()
+                ));
+
+                let versions_metadata = asset_versions
+                    .into_iter()
+                    .rev()
+                    .map(|asset_version| StateVersionMetadata::Asset(asset_version))
+                    .collect();
+                (versions_metadata, "rbxm")
+            }
+        };
+
+        let version_padding = versions_metadata.len().to_string().len();
+        let versions = versions_metadata
+            .into_iter()
+            .rev()
+            .map(|version_metadata| {
+                let version = version_metadata.version();
+                StateVersion {
+                    version,
+                    metadata: version_metadata,
+                    filename: format!("v{version:0version_padding$}.{extension}"),
+                }
+            })
+            .collect();
+        // Update and save state
+        state.versions = Some(versions);
         state.save(&output).context("Failed to save state")?;
     }
     let state_versions = state.versions.as_ref().unwrap();
@@ -273,16 +327,13 @@ pub async fn download_place(
 
     // Only download files which do not already exists
     let num_versions = state_versions.len();
-    let (min, max) = min_max_version(min, max, num_versions)?;
+    let (min, max) = min_max_version(options.min, options.max, num_versions)?;
     let num_selected = max - min + 1;
     let mut to_download = Vec::new();
     for state_version in state_versions.iter().skip(min - 1).take(num_selected) {
         let file_path = Path::join(&output, state_version.filename.clone());
         if !file_path.exists() {
-            to_download.push((
-                state_version.metadata.version.parse::<u64>().unwrap(),
-                file_path,
-            ));
+            to_download.push((state_version.version, file_path));
         }
     }
     trace!("To download: {:?}", to_download);
@@ -298,7 +349,7 @@ pub async fn download_place(
     // Otherwise marks next phase
     if !have_version_metadata {
         eprintln!(
-            "Beginning download for place {place_id} to `{}`",
+            "Beginning download for {asset_type} {id} to `{}`",
             output.display()
         );
     }
@@ -315,7 +366,7 @@ pub async fn download_place(
             );
     bar.set_position((num_selected - num_to_download) as u64);
 
-    let concurrent = concurrent.min(num_to_download);
+    let concurrent = options.concurrent.min(num_to_download);
     let mut handles = Vec::new();
     let progress = Arc::new(progress);
     let next_download_index = Arc::new(AtomicUsize::new(0));
@@ -342,12 +393,13 @@ pub async fn download_place(
                 let (version, file_path) = &to_download[download_index];
 
                 debug!("Downloading version {version}");
-                let delivery_response = client
-                    .asset_version_delivery(place_id, *version)
-                    .await
-                    .context(format!(
-                        "Failed to get asset delivery url for version {version}"
-                    ))?;
+                let delivery_response =
+                    client
+                        .asset_version_delivery(id, *version)
+                        .await
+                        .context(format!(
+                            "Failed to get asset delivery url for version {version}"
+                        ))?;
                 debug!("Got delivery URL for version {version}, starting download",);
                 download_to_file(&file_bar, &client, delivery_response, &file_path).await?;
                 bar.inc(1);
@@ -381,9 +433,7 @@ pub async fn download(
     client: Client,
     output: PathBuf,
     state: State,
-    min: Option<i64>,
-    max: Option<i64>,
-    concurrent: usize,
+    options: DownloadOptions,
 ) -> Result<()> {
     let introspect = client
         .introspect()
@@ -409,8 +459,5 @@ pub async fn download(
             .join(", "),
     );
 
-    match state.state_type {
-        StateType::Place => download_place(progress, client, output, state, min, max, concurrent),
-    }
-    .await
+    download_asset(progress, client, output, state, options).await
 }
