@@ -584,6 +584,8 @@ impl Client {
     }
 
     /// Gets details for a asset
+    /// Requires asset:read
+    /// Docs: https://create.roblox.com/docs/en-us/cloud/reference/features/assets#Assets_GetAsset
     pub async fn asset(&self, asset_id: u64) -> Result<Asset> {
         self.get(
             "asset".to_owned(),
