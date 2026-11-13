@@ -7,6 +7,7 @@ use std::{
 use log::{trace, warn};
 use reqwest::{IntoUrl, Method, Request, Response, StatusCode, Url, header::HeaderMap};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use strum::EnumString;
 use tokio::{sync::Mutex, time::sleep};
 
 const API_BASE: &'static str = "https://apis.roblox.com";
@@ -180,6 +181,28 @@ impl Place {
     }
 }
 
+#[derive(Serialize, Deserialize, strum::Display, EnumString, Clone, Debug)]
+#[serde(rename_all = "PascalCase")]
+#[strum(serialize_all = "PascalCase")]
+pub enum AssetType {
+    Place,
+    /// Packages show up as a Model as well
+    Model,
+    Plugin,
+    Audio,
+    Decal,
+    Image,
+    Video,
+    Mesh,
+    MeshPart,
+    Animation,
+
+    /// Covers all unknown asset types
+    #[serde(untagged)]
+    #[strum(transparent)]
+    Other(String),
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct AssetCreationContextCreator {
@@ -219,7 +242,7 @@ pub struct AssetSocialLink {
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct Asset {
-    pub asset_type: String,
+    pub asset_type: AssetType,
     pub asset_id: String,
     pub creation_context: AssetCreationContext,
     pub description: Option<String>,

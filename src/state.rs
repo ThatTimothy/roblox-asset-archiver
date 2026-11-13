@@ -9,12 +9,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::{Asset, AssetVersion, PlaceVersion};
 
-#[derive(Serialize, Deserialize, PartialEq, Clone, Debug)]
-#[serde(rename_all = "camelCase")]
-pub enum StateType {
-    Place,
-    Model,
-}
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub enum StateVersionMetadata {
@@ -42,8 +36,6 @@ pub struct StateVersion {
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct State {
-    #[serde(rename = "type")]
-    pub state_type: StateType,
     schema_version: String,
     pub id: u64,
     pub references: bool,
@@ -56,9 +48,8 @@ impl State {
     pub const STATE_FILENAME: &str = concat!(env!("CARGO_PKG_NAME"), ".json");
     pub const STATE_SCHEMA_VERSION: &str = concat!(env!("CARGO_PKG_NAME"), ":", "1");
 
-    pub fn new(state_type: StateType, id: u64, references: bool) -> Self {
+    pub fn new(id: u64, references: bool) -> Self {
         Self {
-            state_type,
             schema_version: Self::STATE_SCHEMA_VERSION.to_owned(),
             id,
             references,

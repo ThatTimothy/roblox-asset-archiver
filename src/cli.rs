@@ -4,12 +4,7 @@ use anyhow::{Context, Error, bail};
 use clap::{ArgAction, Args, Parser, Subcommand};
 use log::LevelFilter;
 
-use crate::{
-    api::Client,
-    download::download,
-    progress::Progress,
-    state::{State, StateType},
-};
+use crate::{api::Client, download::download, progress::Progress, state::State};
 
 /// A simple CLI tool to back up and archive every asset (games, places, models, images, passes, etc) on Roblox into a Rojo-compatible Git repository
 #[derive(Parser, Debug)]
@@ -51,31 +46,17 @@ pub struct DownloadOptions {
 
 #[derive(Subcommand, Debug)]
 enum DownloadCommand {
-    /// Downloads all versions of place
-    Place {
-        /// The id of the place to download (roblox.com/games/id)
+    /// Downloads all versions of an asset && associated context
+    ///
+    /// Supports: Place, Model, Plugin, Audio, Decal, Image, Video, Mesh, MeshPart, Animation
+    Asset {
+        /// The id of the asset to download
         id: u64,
 
-        /// The directory to output downloads (will be created, if not passed defaults to place_{id})
+        /// The directory to output downloads [default: output_{id}]
         output: Option<PathBuf>,
 
-        /// Also download assets references (images, meshes, mesh parts, audios, videos, animations)
-        #[arg(short, long)]
-        references: bool,
-
-        #[command(flatten)]
-        options: DownloadOptions,
-    },
-
-    /// Downloads all versions of a model
-    Model {
-        /// The id of the model to download
-        id: u64,
-
-        /// The directory to output downloads (will be created, if not passed defaults to model_{id})
-        output: Option<PathBuf>,
-
-        /// Also download assets references (images, meshes, mesh parts, audios, videos, animations)
+        /// Also download asset's references (images, meshes, mesh parts, audios, videos, animations within it)
         #[arg(short, long)]
         references: bool,
 
@@ -91,48 +72,6 @@ enum DownloadCommand {
         #[command(flatten)]
         options: DownloadOptions,
     },
-}
-
-impl DownloadCommand {
-    pub fn state_type(&self) -> StateType {
-        match self {
-            DownloadCommand::Place { .. } => StateType::Place,
-            DownloadCommand::Model { .. } => StateType::Model,
-            DownloadCommand::Resume { .. } => panic!("Resume does not have state_type"),
-        }
-    }
-
-    pub fn id(&self) -> u64 {
-        match self {
-            DownloadCommand::Place { id, .. } => *id,
-            DownloadCommand::Model { id, .. } => *id,
-            DownloadCommand::Resume { .. } => panic!("Resume does not have id"),
-        }
-    }
-
-    pub fn references(&self) -> bool {
-        match self {
-            DownloadCommand::Place { references, .. } => *references,
-            DownloadCommand::Model { references, .. } => *references,
-            DownloadCommand::Resume { .. } => panic!("Resume does not have references"),
-        }
-    }
-
-    pub fn options(self) -> DownloadOptions {
-        match self {
-            DownloadCommand::Place { options, .. } => options,
-            DownloadCommand::Model { options, .. } => options,
-            DownloadCommand::Resume { options, .. } => options,
-        }
-    }
-
-    pub fn output(&self) -> &Option<PathBuf> {
-        match self {
-            DownloadCommand::Place { output, .. } => output,
-            DownloadCommand::Model { output, .. } => output,
-            DownloadCommand::Resume { output, .. } => output,
-        }
-    }
 }
 
 pub(crate) async fn run() -> Result<(), Error> {
@@ -155,42 +94,47 @@ pub(crate) async fn run() -> Result<(), Error> {
 
     match args.command {
         Command::Download(command) => {
-            // Determine output location (if not passed)
-            let output = match command.output() {
-                Some(output) => output.clone(),
-                None => match &command {
-                    DownloadCommand::Resume { .. } => {
-                        // Scan cwd
-                        let mut possible = Vec::new();
-                        let scan = PathBuf::from(".");
-                        for entry in scan.read_dir().context("Failed to scan directory")? {
-                            if let Ok(entry) = entry
-                                && let Ok(metadata) = entry.metadata()
-                                && metadata.is_dir()
-                                && let path = entry.path()
-                                && path.join(State::STATE_FILENAME).exists()
-                            {
-                                possible.push(path);
+            // Determine output location
+            let output = match &command {
+                DownloadCommand::Resume { output, .. } => {
+                    // Output path is optional for resume
+                    match output {
+                        Some(output) => output.clone(),
+                        None => {
+                            // If not passed, scan cwd
+                            let mut possible = Vec::new();
+                            let scan = PathBuf::from(".");
+                            for entry in scan.read_dir().context("Failed to scan directory")? {
+                                if let Ok(entry) = entry
+                                    && let Ok(metadata) = entry.metadata()
+                                    && metadata.is_dir()
+                                    && let path = entry.path()
+                                    && path.join(State::STATE_FILENAME).exists()
+                                {
+                                    possible.push(path);
+                                }
+                            }
+
+                            match possible.len() {
+                                0 => bail!(
+                                    "Scanned current directory and found resumption targets - try passing [output] directly"
+                                ),
+                                1 => possible.remove(0),
+                                _ => bail!(
+                                    "Scanned current directory and found multiple resumption targets: {} - pass [output] to select one",
+                                    possible
+                                        .iter()
+                                        .map(|p| p.display().to_string())
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                ),
                             }
                         }
-
-                        match possible.len() {
-                            0 => bail!(
-                                "Scanned current directory and found resumption targets - try passing [output] directly"
-                            ),
-                            1 => possible.remove(0),
-                            _ => bail!(
-                                "Scanned current directory and found multiple resumption targets: {} - pass [output] to select one",
-                                possible
-                                    .iter()
-                                    .map(|p| p.display().to_string())
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            ),
-                        }
                     }
-                    DownloadCommand::Place { id, .. } => PathBuf::from(format!("place_{id}")),
-                    DownloadCommand::Model { id, .. } => PathBuf::from(format!("model_{id}")),
+                }
+                DownloadCommand::Asset { output, id, .. } => match output {
+                    Some(output) => output.clone(),
+                    None => PathBuf::from(format!("output_{id}")),
                 },
             };
             let existing_state = State::load(&output).context("Failed to load state")?;
@@ -205,16 +149,14 @@ pub(crate) async fn run() -> Result<(), Error> {
                     }
                     Some(state) => download(progress, client, output, state, options).await,
                 },
-                command => {
-                    let state_type = command.state_type();
-                    let id = command.id();
-                    let references = command.references();
-                    let options = command.options();
+                DownloadCommand::Asset {
+                    id,
+                    references,
+                    options,
+                    ..
+                } => {
                     if let Some(existing_state) = existing_state {
-                        if existing_state.state_type == state_type
-                            && existing_state.id == id
-                            && existing_state.references == references
-                        {
+                        if existing_state.id == id && existing_state.references == references {
                             return download(progress, client, output, existing_state, options)
                                 .await;
                         }
@@ -235,7 +177,7 @@ pub(crate) async fn run() -> Result<(), Error> {
                         progress,
                         client,
                         output,
-                        State::new(state_type, id, references),
+                        State::new(id, references),
                         options,
                     )
                     .await

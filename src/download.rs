@@ -17,10 +17,10 @@ use tokio::{
 };
 
 use crate::{
-    api::{AssetDeliveryResponse, Client},
+    api::{AssetDeliveryResponse, AssetType, Client},
     cli::DownloadOptions,
     progress::{Progress, message},
-    state::{State, StateType, StateVersion, StateVersionMetadata},
+    state::{State, StateVersion, StateVersionMetadata},
 };
 
 const TEMP_FILE_EXTENSION: &str = "temp";
@@ -142,6 +142,10 @@ pub async fn download_asset(
 ) -> Result<()> {
     let State { id, references, .. } = state;
 
+    if references {
+        todo!()
+    }
+
     let output = PathBuf::from(output.clone());
     let spinner = progress.add(
         ProgressBar::new_spinner()
@@ -157,8 +161,15 @@ pub async fn download_asset(
                 output.display()
             );
 
-            let universe_id = match state.state_type {
-                StateType::Place => {
+            message!(spinner, "Fetching {id}");
+            let asset = client
+                .asset(id)
+                .await
+                .with_context(|| format!("Failed to fetch {id} - make sure the id is correct"))?;
+            let asset_type = asset.asset_type.clone();
+
+            let universe_id = match asset_type {
+                AssetType::Place => {
                     // We fetch universe_id to confirm universe exists for places
                     message!(spinner, "Getting universe id for place {id}");
                     let universe_id = async {
@@ -178,12 +189,6 @@ pub async fn download_asset(
                 }
             };
 
-            message!(spinner, "Fetching {id}");
-            let asset = client
-                .asset(id)
-                .await
-                .context("Failed to fetch place - make sure the id is correct")?;
-            let asset_type = asset.asset_type.to_lowercase();
             progress.print(format!(
                 "Found {asset_type} {id}{}: `{}`",
                 match universe_id {
@@ -192,6 +197,10 @@ pub async fn download_asset(
                 },
                 asset.display_name,
             ));
+
+            if let AssetType::Other(asset_type) = &asset_type {
+                warn!("Downloading unknown asset type {asset_type}");
+            }
 
             // Update and save state
             state.universe_id = universe_id;
@@ -202,7 +211,7 @@ pub async fn download_asset(
         }
         Some(asset) => {
             // If it is defined, we're resuming a download
-            let asset_type = asset.asset_type.to_lowercase();
+            let asset_type = asset.asset_type.clone();
             eprintln!(
                 "Resuming download for {asset_type} {id}{}: `{}` to `{}` with references={references}",
                 match state.universe_id {
@@ -220,10 +229,8 @@ pub async fn download_asset(
     let have_version_metadata = state.versions.is_some();
     if !have_version_metadata {
         // Next step: download version metadata
-        let (versions_metadata, extension): (Vec<StateVersionMetadata>, &str) = match state
-            .state_type
-        {
-            StateType::Place => {
+        let versions_metadata: Vec<StateVersionMetadata> = match asset_type {
+            AssetType::Place => {
                 // Place versions have a special endpoint that includes publish notes
                 message!(
                     spinner,
@@ -267,7 +274,7 @@ pub async fn download_asset(
                     .rev()
                     .map(|place_version| StateVersionMetadata::Place(place_version))
                     .collect();
-                (versions_metadata, "rbxl")
+                versions_metadata
             }
             _ => {
                 // Every other type uses standard asset versions
@@ -289,11 +296,21 @@ pub async fn download_asset(
                     .rev()
                     .map(|asset_version| StateVersionMetadata::Asset(asset_version))
                     .collect();
-                (versions_metadata, "rbxm")
+                versions_metadata
             }
         };
 
         let version_padding = versions_metadata.len().to_string().len();
+        let extension = match asset_type {
+            AssetType::Place => "rbxl",
+            AssetType::Model | AssetType::Plugin | AssetType::Animation => "rbxm",
+            AssetType::Audio => todo!(),
+            AssetType::Decal | AssetType::Image => todo!(),
+            AssetType::Video => todo!(),
+            AssetType::Mesh => todo!(),
+            AssetType::MeshPart => todo!(),
+            AssetType::Other(_) => todo!(),
+        };
         let versions = versions_metadata
             .into_iter()
             .rev()
