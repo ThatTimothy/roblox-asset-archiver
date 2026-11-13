@@ -22,7 +22,14 @@ impl Progress {
     /// Prints to stderr without conflicting with progress bar
     /// Cannot just use println as that disappears when progress bar is hidden
     pub fn print(&self, message: impl AsRef<str>) {
-        self.suspend(|| eprintln!("{}", message.as_ref()));
+        // println does not output if bar is hidden (when outputting to non-tty like file)
+        // suspend causes a re-draw each time which results in flickering
+        // so, use stderr for non-tty and builtin println otherwise
+        if self.is_hidden() {
+            eprintln!("{}", message.as_ref());
+        } else {
+            self.println(message.as_ref()).expect("Failed to print");
+        }
     }
 }
 
