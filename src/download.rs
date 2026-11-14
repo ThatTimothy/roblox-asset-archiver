@@ -313,7 +313,6 @@ pub async fn download_asset(
         };
         let versions = versions_metadata
             .into_iter()
-            .rev()
             .map(|version_metadata| {
                 let version = version_metadata.version();
                 StateVersion {
