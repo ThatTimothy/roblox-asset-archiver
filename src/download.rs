@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     fmt::Write,
     path::{Path, PathBuf},
     sync::{
@@ -13,7 +14,7 @@ use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
 use log::{debug, trace, warn};
 use tokio::{
     fs::{self, File},
-    io::{AsyncWriteExt, BufWriter},
+    io::{AsyncReadExt, AsyncWriteExt, BufWriter},
 };
 
 use crate::{
@@ -59,13 +60,53 @@ fn min_max_version(
     Ok((min_version as usize, max_version as usize))
 }
 
-/// Downloads to a file by streaming response into it
-async fn download_to_file<P: AsRef<Path>>(
+/// Determines a file extension a download based on asset_type and magic header
+async fn file_extension(asset_type: &AssetType, path: &Path) -> Result<&'static str> {
+    let file = File::open(&path).await?;
+    let mut header = Vec::with_capacity(1024);
+    file.take(1024)
+        .read_to_end(&mut header)
+        .await
+        .with_context(|| format!("Failed to read header from {}", &path.display()))?;
+    let extension = match header {
+        // Per rbx-dom docs, binary formats rbxl and rbxm have this magic header: https://github.com/rojo-rbx/rbx-dom/blob/master/docs/xml.md#file-structure
+        header if header.starts_with(b"<roblox!") => match asset_type {
+            AssetType::Place => "rbxl",
+            _ => "rbxm",
+        },
+        // Per rbx-dom docs, xml formats rbxlx and rbxmx have this magic header: https://github.com/rojo-rbx/rbx-dom/blob/master/docs/xml.md#file-structure
+        header if header.starts_with(b"<roblox") => match asset_type {
+            AssetType::Place => "rbxlx",
+            _ => "rbxmx",
+        },
+        // Per MaximumADHD's reverse engineering, meshes use proprietary format: https://devforum.roblox.com/t/roblox-filemesh-format-specification/326114
+        // For sanity purposes I'm not writing a conversion for this, but if you want to this is open for PR but probably needs to be a separate project this supports
+        header if header.starts_with(b"version") && asset_type == &AssetType::Mesh => "mesh",
+        header => {
+            let kind = infer::get(&header)
+                .with_context(|| format!("Unknown header {header:?} for {asset_type}"))?;
+
+            kind.extension()
+        }
+    };
+
+    Ok(extension)
+}
+
+/// Downloads to a file by streaming response into it.
+///
+/// First, downloads to `{prefix_path}.temp` - this ensures that partial downloads are always `.temp`.
+/// Then, moves to proper file extension after download is complete.
+/// As such, `prefix_path` should not have an extension since it will be overridden.
+///
+/// Returns the final path
+async fn download_to_file(
     bar: &ProgressBar,
     client: &Client,
     delivery_response: AssetDeliveryResponse,
-    path: P,
-) -> Result<()> {
+    asset_type: &AssetType,
+    prefix_path: &Path,
+) -> Result<PathBuf> {
     // Asset metadata contains uncompressed length as attribute 1, this is undocumented so do not rely but fine for now
     let uncompressed_length = match delivery_response.asset_metadatas {
         Some(asset_metadatas) => asset_metadatas
@@ -80,9 +121,12 @@ async fn download_to_file<P: AsRef<Path>>(
         None => None,
     };
 
+    // Make request, raw_get so content can be streamed to file
     let mut response = client
         .raw_get("asset_download".to_owned(), delivery_response.location)
         .await?;
+
+    // Use progress bar if length defined, otherwise a spinner
     if uncompressed_length.is_some() {
         bar.set_length(uncompressed_length.unwrap());
         bar.set_style(
@@ -101,36 +145,45 @@ async fn download_to_file<P: AsRef<Path>>(
     }
     bar.set_position(0);
     bar.set_elapsed(Duration::ZERO);
-    bar.set_message(format!("Downloading to `{}`", path.as_ref().display()));
+    bar.set_message(format!("Downloading to `{}`", prefix_path.display()));
 
-    let temp_path = path.as_ref().with_extension({
-        let mut extension = path.as_ref().extension().unwrap_or_default().to_os_string();
-        extension.push(".");
-        extension.push(TEMP_FILE_EXTENSION);
-        extension
-    });
+    // Stream to temp path use BufWriter
+    let temp_path = prefix_path.with_extension("temp");
     debug!("Start streaming content to `{}`", temp_path.display());
-    let file = File::create(&temp_path).await?;
-    let mut writer = BufWriter::new(file);
-    while let Some(item) = response.chunk().await? {
-        bar.inc(item.len() as u64);
-        writer.write_all(&item).await?;
+    {
+        let file = File::create(&temp_path).await?;
+        let mut writer = BufWriter::new(file);
+        while let Some(item) = response.chunk().await? {
+            bar.inc(item.len() as u64);
+            writer.write_all(&item).await?;
+        }
+        writer.flush().await?;
     }
-    writer.flush().await?;
     debug!("Streamed content to {}", &temp_path.display());
-    fs::rename(&temp_path, &path).await.with_context(|| {
+
+    // Commit by renaming to proper extension
+    let extension = file_extension(asset_type, &temp_path)
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to determine file extension for {}",
+                temp_path.display()
+            )
+        })?;
+    let file_path = prefix_path.with_extension(extension);
+    fs::rename(&temp_path, &file_path).await.with_context(|| {
         format!(
             "Failed to commit rename from {} to {}",
             &temp_path.display(),
-            &path.as_ref().display()
+            &file_path.display()
         )
     })?;
     debug!(
         "Committed content from {} to {}",
         &temp_path.display(),
-        &path.as_ref().display()
+        &file_path.display()
     );
-    Ok(())
+    Ok(file_path)
 }
 
 pub async fn download_asset(
@@ -301,16 +354,6 @@ pub async fn download_asset(
         };
 
         let version_padding = versions_metadata.len().to_string().len();
-        let extension = match asset_type {
-            AssetType::Place => "rbxl",
-            AssetType::Model | AssetType::Plugin | AssetType::Animation => "rbxm",
-            AssetType::Audio => todo!(),
-            AssetType::Decal | AssetType::Image => todo!(),
-            AssetType::Video => todo!(),
-            AssetType::Mesh => todo!(),
-            AssetType::MeshPart => todo!(),
-            AssetType::Other(_) => todo!(),
-        };
         let versions = versions_metadata
             .into_iter()
             .map(|version_metadata| {
@@ -318,7 +361,7 @@ pub async fn download_asset(
                 StateVersion {
                     version,
                     metadata: version_metadata,
-                    filename: format!("v{version:0version_padding$}.{extension}"),
+                    file_prefix: format!("v{version:0version_padding$}"),
                 }
             })
             .collect();
@@ -329,27 +372,38 @@ pub async fn download_asset(
     let state_versions = state.versions.as_ref().unwrap();
     spinner.finish_and_clear();
 
-    // Remove temp files
+    // Remove temp files & store existing file prefixes
+    let mut existing = HashSet::new();
     for entry in output.read_dir()? {
-        if let Ok(entry) = entry
-            && let Some(extension) = entry.path().extension()
-            && extension == TEMP_FILE_EXTENSION
-        {
-            fs::remove_file(entry.path()).await.with_context(|| {
-                format!("Failed to remove temp file {}", entry.path().display())
-            })?;
+        if let Ok(entry) = entry {
+            let path = entry.path();
+
+            // Remove any temp files
+            if let Some(extension) = entry.path().extension()
+                && extension == TEMP_FILE_EXTENSION
+            {
+                fs::remove_file(entry.path()).await.with_context(|| {
+                    format!("Failed to remove temp file {}", entry.path().display())
+                })?;
+            } else if let Some(file_prefix) = path.file_prefix()
+                && let Some(file_prefix) = file_prefix.to_str()
+            {
+                // If not a temp file, store the file prefix
+                existing.insert(file_prefix.to_owned());
+            }
         }
     }
 
-    // Only download files which do not already exists
+    // Only download files within versions bounds and do not already exist
     let num_versions = state_versions.len();
     let (min, max) = min_max_version(options.min, options.max, num_versions)?;
     let num_selected = max - min + 1;
     let mut to_download = Vec::new();
     for state_version in state_versions.iter().skip(min - 1).take(num_selected) {
-        let file_path = Path::join(&output, state_version.filename.clone());
-        if !file_path.exists() {
-            to_download.push((state_version.version, file_path));
+        let file_prefix = &state_version.file_prefix;
+        if !existing.contains(file_prefix) {
+            let file_prefix_path = output.join(file_prefix);
+            to_download.push((state_version.version, asset_type.clone(), file_prefix_path));
         }
     }
     trace!("To download: {:?}", to_download);
@@ -406,7 +460,7 @@ pub async fn download_asset(
                     // No more work to do
                     break;
                 }
-                let (version, file_path) = &to_download[download_index];
+                let (version, asset_type, file_prefix_path) = &to_download[download_index];
 
                 debug!("Downloading version {version}");
                 let delivery_response =
@@ -417,7 +471,14 @@ pub async fn download_asset(
                             "Failed to get asset delivery url for version {version}"
                         ))?;
                 debug!("Got delivery URL for version {version}, starting download",);
-                download_to_file(&file_bar, &client, delivery_response, &file_path).await?;
+                let file_path = download_to_file(
+                    &file_bar,
+                    &client,
+                    delivery_response,
+                    asset_type,
+                    &file_prefix_path,
+                )
+                .await?;
                 bar.inc(1);
                 progress.print(format!(
                     "Downloaded version {} to `{}`",

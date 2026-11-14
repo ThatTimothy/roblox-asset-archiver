@@ -181,7 +181,7 @@ impl Place {
     }
 }
 
-#[derive(Serialize, Deserialize, strum::Display, EnumString, Clone, Debug)]
+#[derive(Serialize, Deserialize, strum::Display, EnumString, PartialEq, Clone, Debug)]
 #[serde(rename_all = "PascalCase")]
 #[strum(serialize_all = "PascalCase")]
 pub enum AssetType {

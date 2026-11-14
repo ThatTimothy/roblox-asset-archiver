@@ -30,7 +30,7 @@ impl StateVersionMetadata {
 pub struct StateVersion {
     pub version: u64,
     pub metadata: StateVersionMetadata,
-    pub filename: String,
+    pub file_prefix: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
