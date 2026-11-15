@@ -24,7 +24,9 @@ struct CliArgs {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Download all versions of an asset & associated content
+    /// Download asset(s)
+    ///
+    /// Supports: Place, Model, Plugin, Audio, Decal, Image, Video, Mesh, MeshPart, Animation
     #[command(subcommand)]
     Download(DownloadCommand),
 }
@@ -46,7 +48,7 @@ pub struct DownloadOptions {
 
 #[derive(Subcommand, Debug)]
 enum DownloadCommand {
-    /// Downloads all versions of an asset && associated context
+    /// Downloads versions of an asset
     ///
     /// Supports: Place, Model, Plugin, Audio, Decal, Image, Video, Mesh, MeshPart, Animation
     Asset {
@@ -56,7 +58,7 @@ enum DownloadCommand {
         /// The directory to output downloads [default: output_{id}]
         output: Option<PathBuf>,
 
-        /// Also download asset's references (images, meshes, mesh parts, audios, videos, animations within it)
+        /// Also download asset's references (Images, Meshes, MeshParts, Audios, Videos, Animations within it)
         #[arg(short, long)]
         references: bool,
 
