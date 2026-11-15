@@ -56,6 +56,7 @@ enum DownloadCommand {
         id: u64,
 
         /// The directory to output downloads [default: output_{id}]
+        #[arg(short, long)]
         output: Option<PathBuf>,
 
         /// Also download asset's references (Images, Meshes, MeshParts, Audios, Videos, Animations within it)
@@ -69,6 +70,7 @@ enum DownloadCommand {
     /// Resumes a download of any type
     Resume {
         /// The directory passed on previous download (if not passed, scans in current directory)
+        #[arg(short, long)]
         output: Option<PathBuf>,
 
         #[command(flatten)]
