@@ -606,17 +606,6 @@ impl Client {
         .await
     }
 
-    /// Gets details for a asset
-    /// Requires asset:read
-    /// Docs: https://create.roblox.com/docs/en-us/cloud/reference/features/assets#Assets_GetAsset
-    pub async fn asset(&self, asset_id: u64) -> Result<Asset> {
-        self.get(
-            "asset".to_owned(),
-            format!("{API_BASE}/assets/v1/assets/{asset_id}"),
-        )
-        .await
-    }
-
     /// Gets details for a place
     /// Requires no authentication
     /// Docs: https://create.roblox.com/docs/en-us/cloud/reference/features/places#Cloud_GetPlace
@@ -633,6 +622,17 @@ impl Client {
             );
         }
         self.get("place".to_owned(), url).await
+    }
+
+    /// Gets details for a asset
+    /// Requires asset:read
+    /// Docs: https://create.roblox.com/docs/en-us/cloud/reference/features/assets#Assets_GetAsset
+    pub async fn asset(&self, asset_id: u64) -> Result<Asset> {
+        self.get(
+            "asset".to_owned(),
+            format!("{API_BASE}/assets/v1/assets/{asset_id}"),
+        )
+        .await
     }
 
     /// Gets a page of versions of an place
