@@ -186,194 +186,196 @@ async fn download_to_file(
     Ok(file_path)
 }
 
-pub async fn download_asset(
-    progress: Progress,
-    client: Client,
-    mut state: State,
-    options: DownloadOptions,
-) -> Result<()> {
-    let State { id, references, .. } = state;
+async fn get_asset_and_universe(
+    progress: &Progress,
+    client: &Client,
+    state: &mut State,
+) -> Result<AssetType> {
+    // If it is defined, resuming and no work to be done
+    if let Some(asset) = &state.asset {
+        let asset_type = asset.asset_type.clone();
 
-    if references {
-        todo!()
+        return Ok(asset_type);
     }
 
-    let output = PathBuf::from(state.output.clone());
     let spinner = progress.add(
         ProgressBar::new_spinner()
             .with_style(ProgressStyle::with_template("{spinner:.blue} {msg}").unwrap()),
     );
     spinner.enable_steady_tick(Duration::from_millis(100));
 
-    let asset_type = match &state.asset {
-        None => {
-            // If asset not defined, haven't started a download before
-            eprintln!(
-                "Preparing download for {id} to `{}` with references={references}",
-                output.display()
-            );
+    // Get asset information
+    let id = state.id;
+    message!(spinner, "Fetching {id}");
+    let asset = client
+        .asset(id)
+        .await
+        .with_context(|| format!("Failed to fetch {id} - make sure the id is correct"))?;
 
-            message!(spinner, "Fetching {id}");
-            let asset = client
-                .asset(id)
-                .await
-                .with_context(|| format!("Failed to fetch {id} - make sure the id is correct"))?;
-            let asset_type = asset.asset_type.clone();
-
-            let universe_id = match asset_type {
-                AssetType::Place => {
-                    // We fetch universe_id to confirm universe exists for places
-                    message!(spinner, "Getting universe id for place {id}");
-                    let universe_id = async {
-                        let response = client.universe_containing_place(id).await?;
-                        response
-                            .universe_id
-                            .ok_or_else(|| anyhow!("universe_id returned was undefined"))
-                    }
-                    .await
-                    .context("Failed to get universe id for place - make sure the id is correct")?;
-                    debug!("Got universe_id={universe_id}");
-                    Some(universe_id)
-                }
-                _ => {
-                    // Otherwise, no universe id
-                    None
-                }
-            };
-
-            progress.print(format!(
-                "Found {asset_type} {id}{}: `{}`",
-                match universe_id {
-                    Some(universe_id) => format!(" in universe {universe_id}"),
-                    None => "".to_owned(),
-                },
-                asset.display_name,
-            ));
-
-            if let AssetType::Other(asset_type) = &asset_type {
-                warn!("Downloading unknown asset type {asset_type}");
+    let universe_id = match asset.asset_type {
+        AssetType::Place => {
+            // We fetch universe_id to confirm universe exists for places
+            message!(spinner, "Getting universe id for place {id}");
+            let universe_id = async {
+                let response = client.universe_containing_place(id).await?;
+                response
+                    .universe_id
+                    .ok_or_else(|| anyhow!("universe_id returned was undefined"))
             }
-
-            // Update and save state
-            state.universe_id = universe_id;
-            state.asset = Some(asset);
-            state.save().context("Failed to save state")?;
-
-            asset_type
+            .await
+            .context("Failed to get universe id for place - make sure the id is correct")?;
+            debug!("Got universe_id={universe_id}");
+            Some(universe_id)
         }
-        Some(asset) => {
-            // If it is defined, we're resuming a download
-            let asset_type = asset.asset_type.clone();
-            eprintln!(
-                "Resuming download for {asset_type} {id}{}: `{}` to `{}` with references={references}",
-                match state.universe_id {
-                    Some(universe_id) => format!(" in universe {universe_id}"),
-                    None => "".to_owned(),
-                },
-                asset.display_name,
-                output.display()
-            );
-
-            asset_type
+        _ => {
+            // Otherwise, no universe id
+            None
         }
     };
 
-    let have_version_metadata = state.versions.is_some();
-    if !have_version_metadata {
-        // Next step: download version metadata
-        let versions_metadata: Vec<StateVersionMetadata> = match asset_type {
-            AssetType::Place => {
-                // Place versions have a special endpoint that includes publish notes
-                message!(
-                    spinner,
-                    "Fetching place version metadata for {asset_type} {id}"
-                );
-                let place_versions = client
-                    .place_versions(id)
-                    .await
-                    .context("Failed to fetch place versions metadata")?;
-                progress.print(format!(
-                    "Got place version metadata for {asset_type} {id}: {} versions",
-                    place_versions.len()
-                ));
+    progress.print(format!(
+        "Found {} {id}{}: `{}`",
+        asset.asset_type,
+        match universe_id {
+            Some(universe_id) => format!(" in universe {universe_id}"),
+            None => "".to_owned(),
+        },
+        asset.display_name,
+    ));
 
-                // Version does not always have creator - this seems to happen with version 1 specifically but generalized here
-                // If the version does not have a creator, the safe default is the first creator in all versions
-                // Since versions are most recent to oldest, we start from back until we find a version that has a creator
-                let first_creator = place_versions
-                    .iter()
-                    .rev()
-                    .find(|place_version| place_version.created_by.is_some())
-                    .map(|place_version| place_version.created_by.unwrap());
-                if first_creator.is_none() {
-                    warn!("No version exists with a defined creator - creator will not be logged");
-                }
-
-                for place_version in place_versions.iter().rev() {
-                    if place_version.created_by.is_none() {
-                        warn!(
-                            "Version {} has no defined creator, defaulting to first_creator={}",
-                            place_version.version,
-                            first_creator
-                                .map(|first_creator| first_creator.to_string())
-                                .unwrap_or("None, so will remain undefined".to_owned())
-                        );
-                    }
-                }
-
-                let versions_metadata = place_versions
-                    .into_iter()
-                    .rev()
-                    .map(|place_version| StateVersionMetadata::Place(place_version))
-                    .collect();
-                versions_metadata
-            }
-            _ => {
-                // Every other type uses standard asset versions
-                message!(
-                    spinner,
-                    "Fetching asset version metadata for {asset_type} {id}"
-                );
-                let asset_versions = client
-                    .asset_versions(id)
-                    .await
-                    .context("Failed to fetch asset version metadata")?;
-                progress.print(format!(
-                    "Got asset version metadata for {asset_type} {id}: {} versions",
-                    asset_versions.len()
-                ));
-
-                let versions_metadata = asset_versions
-                    .into_iter()
-                    .rev()
-                    .map(|asset_version| StateVersionMetadata::Asset(asset_version))
-                    .collect();
-                versions_metadata
-            }
-        };
-
-        let version_padding = versions_metadata.len().to_string().len();
-        let versions = versions_metadata
-            .into_iter()
-            .map(|version_metadata| {
-                let version = version_metadata.version();
-                StateVersion {
-                    version,
-                    metadata: version_metadata,
-                    file_prefix: format!("v{version:0version_padding$}"),
-                }
-            })
-            .collect();
-        // Update and save state
-        state.versions = Some(versions);
-        state.save().context("Failed to save state")?;
+    if let AssetType::Other(asset_type) = &asset.asset_type {
+        warn!("Downloading unknown asset type {asset_type}");
     }
-    let state_versions = state.versions.as_ref().unwrap();
-    spinner.finish_and_clear();
+    let asset_type = asset.asset_type.clone();
+
+    // Update and save state
+    state.asset = Some(asset);
+    state.universe_id = universe_id;
+    state.save().context("Failed to save state")?;
+
+    Ok(asset_type)
+}
+
+async fn get_versions(
+    progress: &Progress,
+    client: &Client,
+    state: &mut State,
+    asset_type: &AssetType,
+) -> Result<()> {
+    // If defined, resuming and no work to be done
+    if state.versions.is_some() {
+        return Ok(());
+    }
+
+    let spinner = progress.add(
+        ProgressBar::new_spinner()
+            .with_style(ProgressStyle::with_template("{spinner:.blue} {msg}").unwrap()),
+    );
+    spinner.enable_steady_tick(Duration::from_millis(100));
+    // Download version metadata
+    let id = state.id;
+    let versions_metadata: Vec<StateVersionMetadata> = match asset_type {
+        AssetType::Place => {
+            // Place versions have a special endpoint that includes publish notes
+            message!(
+                spinner,
+                "Fetching place version metadata for {asset_type} {id}"
+            );
+            let place_versions = client
+                .place_versions(id)
+                .await
+                .context("Failed to fetch place versions metadata")?;
+            progress.print(format!(
+                "Got place version metadata for {asset_type} {id}: {} versions",
+                place_versions.len()
+            ));
+
+            // Version does not always have creator - this seems to happen with version 1 specifically but generalized here
+            // If the version does not have a creator, the safe default is the first creator in all versions
+            // Since versions are most recent to oldest, we start from back until we find a version that has a creator
+            let first_creator = place_versions
+                .iter()
+                .rev()
+                .find(|place_version| place_version.created_by.is_some())
+                .map(|place_version| place_version.created_by.unwrap());
+            if first_creator.is_none() {
+                warn!("No version exists with a defined creator - creator will not be logged");
+            }
+
+            for place_version in place_versions.iter().rev() {
+                if place_version.created_by.is_none() {
+                    warn!(
+                        "Version {} has no defined creator, defaulting to first_creator={}",
+                        place_version.version,
+                        first_creator
+                            .map(|first_creator| first_creator.to_string())
+                            .unwrap_or("None, so will remain undefined".to_owned())
+                    );
+                }
+            }
+
+            let versions_metadata = place_versions
+                .into_iter()
+                .rev()
+                .map(|place_version| StateVersionMetadata::Place(place_version))
+                .collect();
+            versions_metadata
+        }
+        _ => {
+            // Every other type uses standard asset versions
+            message!(
+                spinner,
+                "Fetching asset version metadata for {asset_type} {id}"
+            );
+            let asset_versions = client
+                .asset_versions(id)
+                .await
+                .context("Failed to fetch asset version metadata")?;
+            progress.print(format!(
+                "Got asset version metadata for {asset_type} {id}: {} versions",
+                asset_versions.len()
+            ));
+
+            let versions_metadata = asset_versions
+                .into_iter()
+                .rev()
+                .map(|asset_version| StateVersionMetadata::Asset(asset_version))
+                .collect();
+            versions_metadata
+        }
+    };
+
+    let version_padding = versions_metadata.len().to_string().len();
+    let versions = versions_metadata
+        .into_iter()
+        .map(|version_metadata| {
+            let version = version_metadata.version();
+            StateVersion {
+                version,
+                metadata: version_metadata,
+                file_prefix: format!("v{version:0version_padding$}"),
+            }
+        })
+        .collect();
+    // Update and save state
+    state.versions = Some(versions);
+    state.save().context("Failed to save state")?;
+
+    Ok(())
+}
+
+async fn download_asset(
+    progress: Progress,
+    client: Client,
+    state: State,
+    asset_type: &AssetType,
+    options: &DownloadOptions,
+) -> Result<()> {
+    assert!(state.versions.is_some());
 
     // Remove temp files & store existing file prefixes
     let mut existing = HashSet::new();
-    for entry in output.read_dir()? {
+    for entry in state.output.read_dir()? {
         if let Ok(entry) = entry {
             let path = entry.path();
 
@@ -394,6 +396,8 @@ pub async fn download_asset(
     }
 
     // Only download files within versions bounds and do not already exist
+    let id = state.id;
+    let state_versions = state.versions.as_ref().unwrap();
     let num_versions = state_versions.len();
     let (min, max) = min_max_version(options.min, options.max, num_versions)?;
     let num_selected = max - min + 1;
@@ -401,7 +405,7 @@ pub async fn download_asset(
     for state_version in state_versions.iter().skip(min - 1).take(num_selected) {
         let file_prefix = &state_version.file_prefix;
         if !existing.contains(file_prefix) {
-            let file_prefix_path = output.join(file_prefix);
+            let file_prefix_path = state.output.join(file_prefix);
             to_download.push((state_version.version, asset_type.clone(), file_prefix_path));
         }
     }
@@ -410,18 +414,22 @@ pub async fn download_asset(
     let num_to_download = to_download.len();
 
     if num_to_download == 0 {
-        eprintln!("All versions already downloaded");
+        progress.print("All versions already downloaded");
         return Ok(());
     }
 
-    // If we already have version metadata, we already logged we are resuming so this message is redundant
-    // Otherwise marks next phase
-    if !have_version_metadata {
-        eprintln!(
-            "Beginning download for {asset_type} {id} to `{}`",
-            output.display()
-        );
-    }
+    progress.print(format!(
+        "Downloading {num_to_download} versions for {asset_type} {id} to `{}`{}",
+        state.output.display(),
+        if num_selected > num_to_download {
+            format!(
+                ", {}/{num_selected} already downloaded",
+                num_selected - num_to_download
+            )
+        } else {
+            "".to_owned()
+        }
+    ));
 
     let bar = progress.add(
                 ProgressBar::new(num_selected as u64)
@@ -496,10 +504,10 @@ pub async fn download_asset(
         handle.await??
     }
 
-    eprintln!(
+    progress.print(format!(
         "Downloaded {num_selected} versions to `{}`",
-        output.display()
-    );
+        state.output.display()
+    ));
 
     Ok(())
 }
@@ -507,7 +515,7 @@ pub async fn download_asset(
 pub async fn download(
     progress: Progress,
     client: Client,
-    state: State,
+    mut state: State,
     options: DownloadOptions,
 ) -> Result<()> {
     let introspect = client
@@ -534,5 +542,34 @@ pub async fn download(
             .join(", "),
     );
 
-    download_asset(progress, client, state, options).await
+    let State { id, references, .. } = state;
+
+    if references {
+        todo!()
+    }
+
+    // Output resuming or preparing based on existing asset information
+    if let Some(asset) = &state.asset {
+        eprintln!(
+            "Resuming download for {} {id}{}: `{}` to `{}` with references={references}",
+            asset.asset_type,
+            match state.universe_id {
+                Some(universe_id) => format!(" in universe {universe_id}"),
+                None => "".to_owned(),
+            },
+            asset.display_name,
+            state.output.display()
+        );
+    } else {
+        eprintln!(
+            "Preparing download for {id} to `{}` with references={references}",
+            state.output.display()
+        );
+    }
+
+    let asset_type = get_asset_and_universe(&progress, &client, &mut state).await?;
+    get_versions(&progress, &client, &mut state, &asset_type).await?;
+    download_asset(progress, client, state, &asset_type, &options).await?;
+
+    Ok(())
 }
