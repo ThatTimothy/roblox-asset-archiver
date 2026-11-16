@@ -1,7 +1,7 @@
 use std::{
     fs::{self, File},
     io::{BufReader, BufWriter, Write},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result, bail};
@@ -42,13 +42,16 @@ pub struct State {
     pub universe_id: Option<u64>,
     pub asset: Option<Asset>,
     pub versions: Option<Vec<StateVersion>>,
+
+    #[serde(skip)]
+    pub output: PathBuf,
 }
 
 impl State {
     pub const STATE_FILENAME: &str = concat!(env!("CARGO_PKG_NAME"), ".json");
     pub const STATE_SCHEMA_VERSION: &str = concat!(env!("CARGO_PKG_NAME"), ":", "1");
 
-    pub fn new(id: u64, references: bool) -> Self {
+    pub fn new(id: u64, references: bool, output: PathBuf) -> Self {
         Self {
             schema_version: Self::STATE_SCHEMA_VERSION.to_owned(),
             id,
@@ -56,11 +59,12 @@ impl State {
             universe_id: None,
             asset: None,
             versions: None,
+            output,
         }
     }
 
-    pub fn load(dir: &Path) -> Result<Option<Self>> {
-        let state_path = dir.join(Self::STATE_FILENAME);
+    pub fn load(output: &Path) -> Result<Option<Self>> {
+        let state_path = output.join(Self::STATE_FILENAME);
         if !state_path.exists() {
             return Ok(None);
         }
@@ -68,7 +72,7 @@ impl State {
         let file = File::open(&state_path)
             .with_context(|| format!("Failed to open `{}`", &state_path.display()))?;
         let reader = BufReader::new(file);
-        let state: State = serde_json::from_reader(reader)
+        let mut state: State = serde_json::from_reader(reader)
             .with_context(|| format!("Failed to read from `{}`", &state_path.display()))?;
 
         if state.schema_version != Self::STATE_SCHEMA_VERSION {
@@ -79,12 +83,14 @@ impl State {
             )
         }
 
+        state.output = output.into();
+
         Ok(Some(state))
     }
 
-    pub fn save(&self, dir: &Path) -> Result<()> {
-        let state_path = dir.join(Self::STATE_FILENAME);
-        let temp_state_path = dir.join(Self::STATE_FILENAME.to_owned() + ".temp");
+    pub fn save(&self) -> Result<()> {
+        let state_path = self.output.join(Self::STATE_FILENAME);
+        let temp_state_path = self.output.join(Self::STATE_FILENAME.to_owned() + ".temp");
 
         // Cleanup old copy
         if temp_state_path.exists() {
@@ -93,7 +99,8 @@ impl State {
         }
 
         // We write to .temp version first, then move it to actual location to prevent mid-write crash causing corrupted file
-        fs::create_dir_all(&dir).with_context(|| format!("Failed to create {}", dir.display()))?;
+        fs::create_dir_all(&self.output)
+            .with_context(|| format!("Failed to create {}", self.output.display()))?;
         let file = File::create(&temp_state_path)
             .with_context(|| format!("Failed to open `{}`", &temp_state_path.display()))?;
         let mut writer = BufWriter::new(file);

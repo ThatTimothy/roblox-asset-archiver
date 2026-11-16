@@ -151,7 +151,7 @@ pub(crate) async fn run() -> Result<(), Error> {
                             State::STATE_FILENAME
                         );
                     }
-                    Some(state) => download(progress, client, output, state, options).await,
+                    Some(state) => download(progress, client, state, options).await,
                 },
                 DownloadCommand::Asset {
                     id,
@@ -161,8 +161,7 @@ pub(crate) async fn run() -> Result<(), Error> {
                 } => {
                     if let Some(existing_state) = existing_state {
                         if existing_state.id == id && existing_state.references == references {
-                            return download(progress, client, output, existing_state, options)
-                                .await;
+                            return download(progress, client, existing_state, options).await;
                         }
                         bail!(
                             "Existing state file found - did you mean to do `{} download resume`?",
@@ -180,8 +179,7 @@ pub(crate) async fn run() -> Result<(), Error> {
                     download(
                         progress,
                         client,
-                        output,
-                        State::new(id, references),
+                        State::new(id, references, output),
                         options,
                     )
                     .await

@@ -189,7 +189,6 @@ async fn download_to_file(
 pub async fn download_asset(
     progress: Progress,
     client: Client,
-    output: PathBuf,
     mut state: State,
     options: DownloadOptions,
 ) -> Result<()> {
@@ -199,7 +198,7 @@ pub async fn download_asset(
         todo!()
     }
 
-    let output = PathBuf::from(output.clone());
+    let output = PathBuf::from(state.output.clone());
     let spinner = progress.add(
         ProgressBar::new_spinner()
             .with_style(ProgressStyle::with_template("{spinner:.blue} {msg}").unwrap()),
@@ -258,7 +257,7 @@ pub async fn download_asset(
             // Update and save state
             state.universe_id = universe_id;
             state.asset = Some(asset);
-            state.save(&output).context("Failed to save state")?;
+            state.save().context("Failed to save state")?;
 
             asset_type
         }
@@ -367,7 +366,7 @@ pub async fn download_asset(
             .collect();
         // Update and save state
         state.versions = Some(versions);
-        state.save(&output).context("Failed to save state")?;
+        state.save().context("Failed to save state")?;
     }
     let state_versions = state.versions.as_ref().unwrap();
     spinner.finish_and_clear();
@@ -508,7 +507,6 @@ pub async fn download_asset(
 pub async fn download(
     progress: Progress,
     client: Client,
-    output: PathBuf,
     state: State,
     options: DownloadOptions,
 ) -> Result<()> {
@@ -536,5 +534,5 @@ pub async fn download(
             .join(", "),
     );
 
-    download_asset(progress, client, output, state, options).await
+    download_asset(progress, client, state, options).await
 }
