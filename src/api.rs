@@ -20,6 +20,7 @@ pub struct APICodeMessageError {
 }
 
 /// Represents the two types of possible API errors
+///
 /// Docs: https://create.roblox.com/docs/cloud/reference/errors
 #[derive(Deserialize, Debug)]
 #[serde(untagged)]
@@ -304,6 +305,7 @@ pub struct AssetDeliveryResponse {
 
 impl AssetDeliveryResponse {
     /// Get the uncompressed length of the asset, if specified
+    ///
     /// Relies on undocumented behavior, so no assumptions made
     pub fn uncompressed_length(&self) -> Option<u64> {
         match &self.asset_metadatas {
@@ -374,6 +376,7 @@ impl Client {
     }
 
     /// Sends a request, parses error out and returns raw response in success case
+    ///
     /// Errors docs: https://create.roblox.com/docs/cloud/reference/errors
     /// Rate limit docs: https://create.roblox.com/docs/cloud/reference/rate-limits
     async fn send_request(&self, ratelimit_key: String, mut request: Request) -> Result<Response> {
@@ -589,6 +592,7 @@ impl Client {
     }
 
     /// Returns introspection of an API key - can be used to validate if an API key is enabled and not expired
+    ///
     /// Docs: https://create.roblox.com/docs/cloud/auth/api-keys#introspect-api-keys
     pub async fn introspect(&self) -> Result<IntrospectResponse> {
         self.post(
@@ -602,7 +606,9 @@ impl Client {
     }
 
     /// Gets the universe id for a place id
+    ///
     /// Requires no authentication
+    ///
     /// Undocumented (see https://devforum.roblox.com/t/httpsapisrobloxcomuniversesv1placesplaceiduniverse-endpoint-is-not-documented/4915512)
     pub async fn universe_containing_place(
         &self,
@@ -616,7 +622,9 @@ impl Client {
     }
 
     /// Gets details for a universe
+    ///
     /// Requires no authentication
+    ///
     /// Docs: https://create.roblox.com/docs/en-us/cloud/reference/features/universes#Cloud_GetUniverse
     pub async fn universe(&self, universe_id: u64) -> Result<Universe> {
         self.get(
@@ -627,7 +635,9 @@ impl Client {
     }
 
     /// Gets details for a place
+    ///
     /// Requires no authentication
+    ///
     /// Docs: https://create.roblox.com/docs/en-us/cloud/reference/features/places#Cloud_GetPlace
     pub async fn place(&self, universe_id: u64, place_id: u64) -> Result<Place> {
         let mut url = Url::parse(&format!(
@@ -645,7 +655,9 @@ impl Client {
     }
 
     /// Gets details for a asset
+    ///
     /// Requires asset:read
+    ///
     /// Docs: https://create.roblox.com/docs/en-us/cloud/reference/features/assets#Assets_GetAsset
     pub async fn asset(&self, asset_id: u64) -> Result<Asset> {
         self.get(
@@ -676,7 +688,9 @@ impl Client {
     }
 
     /// Gets all versions of a place, with notes and contributor information
+    ///
     /// Requires universe.place:read ON EVERYTHING (see https://devforum.roblox.com/t/getplaceversionhistory-endpoint-should-not-require-scope-to-all-resources/4976529 for feature request)
+    ///
     /// Docs: https://create.roblox.com/docs/en-us/cloud/reference/domains/apis#PlaceVersion_GetPlaceVersionHistory
     pub async fn place_versions(&self, place_id: u64) -> Result<Vec<PlaceVersion>> {
         let mut results = Vec::new();
@@ -704,8 +718,10 @@ impl Client {
         Ok(results)
     }
 
-    /// Gets an asset delivery URL of an asset, use Client::download_o_fil
+    /// Gets an asset delivery URL of an asset
+    ///
     /// Requires legacy-asset:manage
+    ///
     /// Docs: https://create.roblox.com/docs/en-us/cloud/reference/domains/apis#get_asset_delivery_api_v1_assetId__assetId__version__versionNumber_
     pub async fn asset_version_delivery(
         &self,
@@ -738,8 +754,11 @@ impl Client {
     }
 
     /// Gets all versions of an asset
+    ///
     /// Requires asset:read
+    ///
     /// Docs: https://create.roblox.com/docs/cloud/reference/features/assets#listAssetVersions
+    ///
     /// Note: inconsistent with docs, see https://devforum.roblox.com/t/listassetversions-example-is-completely-wrong/4976456
     pub async fn asset_versions(&self, asset_id: u64) -> Result<Vec<AssetVersion>> {
         let mut results = Vec::new();
