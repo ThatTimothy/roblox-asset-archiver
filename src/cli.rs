@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{num::NonZeroUsize, path::PathBuf};
 
 use anyhow::{Context, Error, bail};
 use clap::{ArgAction, Args, Parser, Subcommand};
@@ -33,13 +33,13 @@ enum Command {
 
 #[derive(Args, Debug)]
 pub struct DownloadOptions {
-    /// The minimum version to fetch (negative values mean from the most recent; -1 is the latest, -2 is the previous version, 10 is version 10, default 1)
-    #[arg(long, allow_hyphen_values = true)]
-    pub min: Option<i64>,
+    /// Only fetch the first n versions (the earliest n versions, passing without value (`--first`) defaults to the earliest 1)
+    #[arg(long, alias="earliest", conflicts_with = "last", num_args=0..=1, default_missing_value = "1")]
+    pub first: Option<NonZeroUsize>,
 
-    /// The maximum version to fetch (negative values mean from the most recent; -1 is the latest, -2 is the previous version, 10 is version 10, default latest version)
-    #[arg(long, allow_hyphen_values = true)]
-    pub max: Option<i64>,
+    /// Only fetch the last n versions (the latest n versions, passing without value (`--last`) defaults to the latest 1)
+    #[arg(long, alias="latest", conflicts_with = "first", num_args=0..=1, default_missing_value = "1")]
+    pub last: Option<NonZeroUsize>,
 
     /// The number of concurrent downloads to perform
     #[arg(short, long, default_value_t = 8)]

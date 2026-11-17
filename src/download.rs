@@ -26,73 +26,6 @@ use crate::{
 
 const TEMP_FILE_EXTENSION: &str = "temp";
 
-// Figures out min and max version by args, rejecting invalid combinations
-fn min_max_version(
-    min: Option<i64>,
-    max: Option<i64>,
-    num_versions: usize,
-) -> Result<(usize, usize)> {
-    let resolve = |arg| match arg {
-        Some(arg) if arg == 0 => None,
-        Some(arg) if arg > 0 => Some(arg),
-        Some(arg) => Some(num_versions as i64 + arg + 1),
-        None => None,
-    };
-    let min_version = resolve(min).unwrap_or(1);
-    let max_version = resolve(max).unwrap_or(num_versions as i64);
-
-    if min_version > max_version {
-        bail!(
-            "Min version cannot be greater than max version (min = {min_version}, max = {max_version})"
-        );
-    }
-
-    if min_version < 1 {
-        bail!("Min version cannot be below 1 (min = {min_version}, max = {max_version})");
-    }
-
-    if max_version > num_versions as i64 {
-        bail!(
-            "Max version cannot be above num_versions={num_versions} (min = {min_version}, max = {max_version})"
-        );
-    }
-
-    Ok((min_version as usize, max_version as usize))
-}
-
-/// Determines a file extension a download based on asset_type and magic header
-async fn file_extension(asset_type: &AssetType, path: &Path) -> Result<&'static str> {
-    let file = File::open(&path).await?;
-    let mut header = Vec::with_capacity(1024);
-    file.take(1024)
-        .read_to_end(&mut header)
-        .await
-        .with_context(|| format!("Failed to read header from {}", &path.display()))?;
-    let extension = match header {
-        // Per rbx-dom docs, binary formats rbxl and rbxm have this magic header: https://github.com/rojo-rbx/rbx-dom/blob/master/docs/xml.md#file-structure
-        header if header.starts_with(b"<roblox!") => match asset_type {
-            AssetType::Place => "rbxl",
-            _ => "rbxm",
-        },
-        // Per rbx-dom docs, xml formats rbxlx and rbxmx have this magic header: https://github.com/rojo-rbx/rbx-dom/blob/master/docs/xml.md#file-structure
-        header if header.starts_with(b"<roblox") => match asset_type {
-            AssetType::Place => "rbxlx",
-            _ => "rbxmx",
-        },
-        // Per MaximumADHD's reverse engineering, meshes use proprietary format: https://devforum.roblox.com/t/roblox-filemesh-format-specification/326114
-        // For sanity purposes I'm not writing a conversion for this, but if you want to this is open for PR but probably needs to be a separate project this supports
-        header if header.starts_with(b"version") && asset_type == &AssetType::Mesh => "mesh",
-        header => {
-            let kind = infer::get(&header)
-                .with_context(|| format!("Unknown header {header:?} for {asset_type}"))?;
-
-            kind.extension()
-        }
-    };
-
-    Ok(extension)
-}
-
 async fn get_asset_and_universe(
     progress: &Progress,
     client: &Client,
@@ -271,6 +204,39 @@ async fn get_versions(
     Ok(())
 }
 
+/// Determines a file extension a download based on asset_type and magic header
+async fn file_extension(asset_type: &AssetType, path: &Path) -> Result<&'static str> {
+    let file = File::open(&path).await?;
+    let mut header = Vec::with_capacity(1024);
+    file.take(1024)
+        .read_to_end(&mut header)
+        .await
+        .with_context(|| format!("Failed to read header from {}", &path.display()))?;
+    let extension = match header {
+        // Per rbx-dom docs, binary formats rbxl and rbxm have this magic header: https://github.com/rojo-rbx/rbx-dom/blob/master/docs/xml.md#file-structure
+        header if header.starts_with(b"<roblox!") => match asset_type {
+            AssetType::Place => "rbxl",
+            _ => "rbxm",
+        },
+        // Per rbx-dom docs, xml formats rbxlx and rbxmx have this magic header: https://github.com/rojo-rbx/rbx-dom/blob/master/docs/xml.md#file-structure
+        header if header.starts_with(b"<roblox") => match asset_type {
+            AssetType::Place => "rbxlx",
+            _ => "rbxmx",
+        },
+        // Per MaximumADHD's reverse engineering, meshes use proprietary format: https://devforum.roblox.com/t/roblox-filemesh-format-specification/326114
+        // For sanity purposes I'm not writing a conversion for this, but if you want to this is open for PR but probably needs to be a separate project this supports
+        header if header.starts_with(b"version") && asset_type == &AssetType::Mesh => "mesh",
+        header => {
+            let kind = infer::get(&header)
+                .with_context(|| format!("Unknown header {header:?} for {asset_type}"))?;
+
+            kind.extension()
+        }
+    };
+
+    Ok(extension)
+}
+
 /// Downloads to an asset version to a file
 ///
 /// First, contacts asset delivery to find cdn url.
@@ -397,10 +363,16 @@ async fn download_asset(
     let id = state.id;
     let state_versions = state.versions.as_ref().unwrap();
     let num_versions = state_versions.len();
-    let (min, max) = min_max_version(options.min, options.max, num_versions)?;
+    let mut min = 1usize;
+    let mut max = num_versions;
+    if let Some(first) = options.first {
+        max = first.get().min(num_versions);
+    } else if let Some(last) = options.last {
+        min = num_versions - (last.get().min(num_versions)) + 1;
+    }
     let num_selected = max - min + 1;
     let mut to_download = Vec::new();
-    for state_version in state_versions.iter().skip(min - 1).take(num_selected) {
+    for state_version in &state_versions[min - 1..=max - 1] {
         let file_prefix = &state_version.file_prefix;
         if !existing.contains(file_prefix) {
             let file_prefix_path = state.output.join(file_prefix);
