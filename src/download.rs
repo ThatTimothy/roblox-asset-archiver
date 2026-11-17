@@ -510,10 +510,10 @@ pub async fn download(
         .context("Failed to validate API key")?;
 
     if !introspect.enabled {
-        bail!("API key {} is not enabled", introspect.name);
+        bail!("API key \"{}\" is not enabled", introspect.name);
     }
     if introspect.expired {
-        bail!("API key {} is expired", introspect.name);
+        bail!("API key \"{}\" is expired", introspect.name);
     }
 
     debug!(
