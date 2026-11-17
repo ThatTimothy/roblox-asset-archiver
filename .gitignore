@@ -2,4 +2,6 @@
 /output
 **/roblox-asset-archiver.json
 *.rbxl
+*.rbxlx
 *.rbxm
+*.rbxmx

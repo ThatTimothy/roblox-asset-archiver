@@ -26,7 +26,7 @@ struct CliArgs {
 enum Command {
     /// Download asset(s)
     ///
-    /// Supports: Place, Model, Plugin, Audio, Decal, Image, Video, Mesh, MeshPart, Animation
+    /// Supports: Place, Model, Plugin, Audio, Decal, Image, Video, Mesh, MeshPart, Animation, all clothing items, all animation avatar items
     #[command(subcommand)]
     Download(DownloadCommand),
 }
@@ -50,7 +50,7 @@ pub struct DownloadOptions {
 enum DownloadCommand {
     /// Downloads versions of an asset
     ///
-    /// Supports: Place, Model, Plugin, Audio, Decal, Image, Video, Mesh, MeshPart, Animation
+    /// Supports: Place, Model, Plugin, Audio, Decal, Image, Video, Mesh, MeshPart, Animation, all clothing items, all animation avatar items
     Asset {
         /// The id of the asset to download
         id: u64,

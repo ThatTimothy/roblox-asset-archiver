@@ -181,11 +181,17 @@ pub struct Place {
     pub server_size: u64,
 }
 
+/// Represents an AssetType
+///
+/// Ref: https://create.roblox.com/docs/reference/engine/enums/AssetType
 #[derive(Serialize, Deserialize, strum::Display, EnumString, PartialEq, Clone, Debug)]
 #[serde(rename_all = "PascalCase")]
 #[strum(serialize_all = "PascalCase")]
 pub enum AssetType {
+    /* Places */
     Place,
+
+    /* Development Item Assets */
     /// Packages show up as a Model as well
     Model,
     Plugin,
@@ -196,6 +202,69 @@ pub enum AssetType {
     Mesh,
     MeshPart,
     Animation,
+    FontFamily,
+
+    /* Classic clothing avatar items */
+    #[serde(alias = "Tshirt")] // some APIs give Tshirt for some reason
+    TShirt,
+    Shirt,
+    Pants,
+
+    /* Body avatar items */
+    Hat,
+    Head,
+    Face,
+    Gear,
+    Torso,
+    RightArm,
+    LeftArm,
+    LeftLeg,
+    RightLeg,
+
+    /* Accessory avatar items */
+    HairAccessory,
+    FaceAccessory,
+    NeckAccessory,
+    ShoulderAccessory,
+    FrontAccessory,
+    BackAccessory,
+    WaistAccessory,
+    EarAccessory,
+    EyeAccessory,
+
+    /* Animation avatar items */
+    /// Animation package - not to be confused with a Model package
+    Package,
+    ClimbAnimation,
+    DeathAnimation,
+    FallAnimation,
+    IdleAnimation,
+    JumpAnimation,
+    RunAnimation,
+    SwimAnimation,
+    WalkAnimation,
+    PoseAnimation,
+    EmoteAnimation,
+    MoodAnimation,
+
+    /* Modern clothing */
+    TShirtAccessory,
+    ShirtAccessory,
+    PantsAccessory,
+    JacketAccessory,
+    SweaterAccessory,
+    ShortsAccessory,
+    LeftShoeAccessory,
+    RightShoeAccessory,
+    DressSkirtAccessory,
+    EyebrowAccessory,
+    EyelashAccessory,
+    DynamicHead,
+    FaceMakeup,
+    LipMakeup,
+    EyeMakeup,
+
+    AvatarBackground,
 
     /// Covers all unknown asset types
     #[serde(untagged)]
