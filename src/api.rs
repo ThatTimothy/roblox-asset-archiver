@@ -143,7 +143,7 @@ pub struct UniverseContainingPlaceResponse {
     pub universe_id: Option<u64>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct Universe {
     /// Full path containing universe_id: `universes/{universe_id}``
@@ -158,6 +158,17 @@ pub struct Universe {
     pub group: Option<String>,
 }
 
+impl Universe {
+    /// Parses universe_id from [Place::path]
+    pub fn universe_id(&self) -> u64 {
+        self.path
+            .strip_prefix("universes/")
+            .expect("Malformed universe path")
+            .parse()
+            .expect("Malformed universe path")
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct Place {
@@ -168,18 +179,6 @@ pub struct Place {
     pub display_name: String,
     pub description: String,
     pub server_size: u64,
-}
-
-impl Place {
-    /// Parses universe_id from [Place::path]
-    pub fn universe_id(&self) -> u64 {
-        self.path
-            .split("/")
-            .nth(1)
-            .expect("Malformed place path")
-            .parse()
-            .expect("Malformed place path")
-    }
 }
 
 #[derive(Serialize, Deserialize, strum::Display, EnumString, PartialEq, Clone, Debug)]

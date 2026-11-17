@@ -21,19 +21,15 @@ use crate::{
     api::{AssetType, Client},
     cli::DownloadOptions,
     progress::{Progress, message},
-    state::{State, StateVersion, StateVersionMetadata},
+    state::{State, StateAsset, StateVersion, StateVersionMetadata},
 };
 
 const TEMP_FILE_EXTENSION: &str = "temp";
 
-async fn get_asset_and_universe(
-    progress: &Progress,
-    client: &Client,
-    state: &mut State,
-) -> Result<AssetType> {
+async fn get_asset(progress: &Progress, client: &Client, state: &mut State) -> Result<AssetType> {
     // If it is defined, resuming and no work to be done
-    if let Some(asset) = &state.asset {
-        let asset_type = asset.asset_type.clone();
+    if let Some(state_asset) = &state.asset {
+        let asset_type = state_asset.asset.asset_type.clone();
 
         return Ok(asset_type);
     }
@@ -52,7 +48,7 @@ async fn get_asset_and_universe(
         .await
         .with_context(|| format!("Failed to fetch {id} - make sure the id is correct"))?;
 
-    let universe_id = match asset.asset_type {
+    let universe = match asset.asset_type {
         AssetType::Place => {
             // We fetch universe_id to confirm universe exists for places
             message!(spinner, "Getting universe id for place {id}");
@@ -65,7 +61,15 @@ async fn get_asset_and_universe(
             .await
             .context("Failed to get universe id for place - make sure the id is correct")?;
             debug!("Got universe_id={universe_id}");
-            Some(universe_id)
+
+            message!(spinner, "Getting universe {id}");
+            let universe = client
+                .universe(universe_id)
+                .await
+                .with_context(|| format!("Failed to fetch universe {universe_id}"))?;
+            debug!("Got universe {universe_id} \"{}\"", universe.display_name);
+
+            Some(universe)
         }
         _ => {
             // Otherwise, no universe id
@@ -73,11 +77,28 @@ async fn get_asset_and_universe(
         }
     };
 
+    let place = if asset.asset_type == AssetType::Place {
+        message!(spinner, "Getting place {id}");
+        let place = client
+            .place(universe.as_ref().unwrap().universe_id(), id)
+            .await
+            .with_context(|| format!("Failed to fetch place {id}"))?;
+        debug!("Got place {id} \"{}\"", place.display_name);
+
+        Some(place)
+    } else {
+        None
+    };
+
     progress.print(format!(
-        "Found {} {id}{}: `{}`",
+        "Found {} {id} \"{}\"{}",
         asset.asset_type,
-        match universe_id {
-            Some(universe_id) => format!(" in universe {universe_id}"),
+        match &universe {
+            Some(universe) => format!(
+                " in universe {} \"{}\"",
+                universe.universe_id(),
+                universe.display_name
+            ),
             None => "".to_owned(),
         },
         asset.display_name,
@@ -89,8 +110,11 @@ async fn get_asset_and_universe(
     let asset_type = asset.asset_type.clone();
 
     // Update and save state
-    state.asset = Some(asset);
-    state.universe_id = universe_id;
+    state.asset = Some(StateAsset {
+        asset,
+        place,
+        universe,
+    });
     state.save().context("Failed to save state")?;
 
     Ok(asset_type)
@@ -493,7 +517,7 @@ pub async fn download(
     }
 
     debug!(
-        "API key `{}` owned by {} validated, scopes: {}",
+        "API key \"{}\" owned by {} validated, scopes: {}",
         introspect.name,
         introspect.authorized_user_id,
         introspect
@@ -511,15 +535,20 @@ pub async fn download(
     }
 
     // Output resuming or preparing based on existing asset information
-    if let Some(asset) = &state.asset {
+    if let Some(state_asset) = &state.asset {
+        let asset = &state_asset.asset;
         eprintln!(
-            "Resuming download for {} {id}{}: `{}` to `{}` with references={references}",
+            "Resuming download for {} {id} \"{}\"{} to `{}` with references={references}",
             asset.asset_type,
-            match state.universe_id {
-                Some(universe_id) => format!(" in universe {universe_id}"),
+            asset.display_name,
+            match &state_asset.universe {
+                Some(universe) => format!(
+                    " in universe {} \"{}\"",
+                    universe.universe_id(),
+                    universe.display_name
+                ),
                 None => "".to_owned(),
             },
-            asset.display_name,
             state.output.display()
         );
     } else {
@@ -529,7 +558,7 @@ pub async fn download(
         );
     }
 
-    let asset_type = get_asset_and_universe(&progress, &client, &mut state).await?;
+    let asset_type = get_asset(&progress, &client, &mut state).await?;
     get_versions(&progress, &client, &mut state, &asset_type).await?;
     download_asset(progress, client, state, &asset_type, &options).await?;
 

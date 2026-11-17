@@ -7,7 +7,15 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::api::{Asset, AssetVersion, PlaceVersion};
+use crate::api::{Asset, AssetVersion, Place, PlaceVersion, Universe};
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct StateAsset {
+    pub asset: Asset,
+    pub place: Option<Place>,
+    pub universe: Option<Universe>,
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -39,8 +47,7 @@ pub struct State {
     schema_version: String,
     pub id: u64,
     pub references: bool,
-    pub universe_id: Option<u64>,
-    pub asset: Option<Asset>,
+    pub asset: Option<StateAsset>,
     pub versions: Option<Vec<StateVersion>>,
 
     #[serde(skip)]
@@ -56,7 +63,6 @@ impl State {
             schema_version: Self::STATE_SCHEMA_VERSION.to_owned(),
             id,
             references,
-            universe_id: None,
             asset: None,
             versions: None,
             output,
