@@ -93,6 +93,7 @@ async fn get_asset(progress: &Progress, client: &Client, state: &mut State) -> R
     progress.print(format!(
         "Found {} {id} \"{}\"{}",
         asset.asset_type,
+        asset.display_name,
         match &universe {
             Some(universe) => format!(
                 " in universe {} \"{}\"",
@@ -101,7 +102,6 @@ async fn get_asset(progress: &Progress, client: &Client, state: &mut State) -> R
             ),
             None => "".to_owned(),
         },
-        asset.display_name,
     ));
 
     if let AssetType::Other(asset_type) = &asset.asset_type {
