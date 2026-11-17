@@ -26,12 +26,10 @@ use crate::{
 
 const TEMP_FILE_EXTENSION: &str = "temp";
 
-async fn get_asset(progress: &Progress, client: &Client, state: &mut State) -> Result<AssetType> {
+async fn get_asset(progress: &Progress, client: &Client, state: &mut State) -> Result<()> {
     // If it is defined, resuming and no work to be done
-    if let Some(state_asset) = &state.asset {
-        let asset_type = state_asset.asset.asset_type.clone();
-
-        return Ok(asset_type);
+    if state.asset.is_some() {
+        return Ok(());
     }
 
     let spinner = progress.add(
@@ -90,42 +88,25 @@ async fn get_asset(progress: &Progress, client: &Client, state: &mut State) -> R
         None
     };
 
-    progress.print(format!(
-        "Found {} {id} \"{}\"{}",
-        asset.asset_type,
-        asset.display_name,
-        match &universe {
-            Some(universe) => format!(
-                " in universe {} \"{}\"",
-                universe.universe_id(),
-                universe.display_name
-            ),
-            None => "".to_owned(),
-        },
-    ));
-
     if let AssetType::Other(asset_type) = &asset.asset_type {
         warn!("Downloading unknown asset type {asset_type}");
     }
-    let asset_type = asset.asset_type.clone();
 
-    // Update and save state
-    state.asset = Some(StateAsset {
+    let state_asset = StateAsset {
         asset,
         place,
         universe,
-    });
+    };
+    progress.print(format!("Found {state_asset:#}"));
+
+    // Update and save state
+    state.asset = Some(state_asset);
     state.save().context("Failed to save state")?;
 
-    Ok(asset_type)
+    Ok(())
 }
 
-async fn get_versions(
-    progress: &Progress,
-    client: &Client,
-    state: &mut State,
-    asset_type: &AssetType,
-) -> Result<()> {
+async fn get_versions(progress: &Progress, client: &Client, state: &mut State) -> Result<()> {
     // If defined, resuming and no work to be done
     if state.versions.is_some() {
         return Ok(());
@@ -138,19 +119,17 @@ async fn get_versions(
     spinner.enable_steady_tick(Duration::from_millis(100));
     // Download version metadata
     let id = state.id;
-    let versions_metadata: Vec<StateVersionMetadata> = match asset_type {
+    let state_asset = state.asset.as_ref().unwrap();
+    let versions_metadata: Vec<StateVersionMetadata> = match state_asset.asset.asset_type {
         AssetType::Place => {
             // Place versions have a special endpoint that includes publish notes
-            message!(
-                spinner,
-                "Fetching place version metadata for {asset_type} {id}"
-            );
+            message!(spinner, "Fetching place version metadata for {state_asset}");
             let place_versions = client
                 .place_versions(id)
                 .await
                 .context("Failed to fetch place versions metadata")?;
             progress.print(format!(
-                "Got place version metadata for {asset_type} {id}: {} versions",
+                "Got place version metadata for {state_asset}: {} versions",
                 place_versions.len()
             ));
 
@@ -187,16 +166,13 @@ async fn get_versions(
         }
         _ => {
             // Every other type uses standard asset versions
-            message!(
-                spinner,
-                "Fetching asset version metadata for {asset_type} {id}"
-            );
+            message!(spinner, "Fetching asset version metadata for {state_asset}");
             let asset_versions = client
                 .asset_versions(id)
                 .await
                 .context("Failed to fetch asset version metadata")?;
             progress.print(format!(
-                "Got asset version metadata for {asset_type} {id}: {} versions",
+                "Got asset version metadata for {state_asset}: {} versions",
                 asset_versions.len()
             ));
 
@@ -356,7 +332,6 @@ async fn download_asset(
     progress: Progress,
     client: Client,
     state: State,
-    asset_type: &AssetType,
     options: &DownloadOptions,
 ) -> Result<()> {
     assert!(state.versions.is_some());
@@ -385,6 +360,7 @@ async fn download_asset(
 
     // Only download files within versions bounds and do not already exist
     let id = state.id;
+    let state_asset = state.asset.as_ref().unwrap();
     let state_versions = state.versions.as_ref().unwrap();
     let num_versions = state_versions.len();
     let mut min = 1usize;
@@ -400,7 +376,11 @@ async fn download_asset(
         let file_prefix = &state_version.file_prefix;
         if !existing.contains(file_prefix) {
             let file_prefix_path = state.output.join(file_prefix);
-            to_download.push((state_version.version, asset_type.clone(), file_prefix_path));
+            to_download.push((
+                state_version.version,
+                state_asset.asset.asset_type.clone(),
+                file_prefix_path,
+            ));
         }
     }
     trace!("To download: {:?}", to_download);
@@ -413,7 +393,7 @@ async fn download_asset(
     }
 
     progress.print(format!(
-        "Downloading {num_to_download} versions for {asset_type} {id} to `{}`{}",
+        "Downloading {num_to_download} versions for {state_asset} to `{}`{}",
         state.output.display(),
         if num_selected > num_to_download {
             format!(
@@ -491,7 +471,7 @@ async fn download_asset(
     }
 
     progress.print(format!(
-        "Downloaded {num_selected} versions to `{}`",
+        "Downloaded {num_selected} versions of {state_asset} to `{}`",
         state.output.display()
     ));
 
@@ -536,19 +516,8 @@ pub async fn download(
 
     // Output resuming or preparing based on existing asset information
     if let Some(state_asset) = &state.asset {
-        let asset = &state_asset.asset;
         eprintln!(
-            "Resuming download for {} {id} \"{}\"{} to `{}` with references={references}",
-            asset.asset_type,
-            asset.display_name,
-            match &state_asset.universe {
-                Some(universe) => format!(
-                    " in universe {} \"{}\"",
-                    universe.universe_id(),
-                    universe.display_name
-                ),
-                None => "".to_owned(),
-            },
+            "Resuming download for {state_asset:#} to `{}` with references={references}",
             state.output.display()
         );
     } else {
@@ -558,9 +527,9 @@ pub async fn download(
         );
     }
 
-    let asset_type = get_asset(&progress, &client, &mut state).await?;
-    get_versions(&progress, &client, &mut state, &asset_type).await?;
-    download_asset(progress, client, state, &asset_type, &options).await?;
+    get_asset(&progress, &client, &mut state).await?;
+    get_versions(&progress, &client, &mut state).await?;
+    download_asset(progress, client, state, &options).await?;
 
     Ok(())
 }

@@ -1,4 +1,5 @@
 use std::{
+    fmt::Display,
     fs::{self, File},
     io::{BufReader, BufWriter, Write},
     path::{Path, PathBuf},
@@ -15,6 +16,30 @@ pub struct StateAsset {
     pub asset: Asset,
     pub place: Option<Place>,
     pub universe: Option<Universe>,
+}
+
+impl Display for StateAsset {
+    /// Displays an asset as `{type} {id} "{name}"`, including `in universe {id} "{name}"` for alternate form (#)
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} {} \"{}\"",
+            self.asset.asset_type, self.asset.asset_id, self.asset.display_name,
+        )?;
+
+        if f.alternate()
+            && let Some(universe) = &self.universe
+        {
+            write!(
+                f,
+                " in universe {} \"{}\"",
+                universe.universe_id(),
+                universe.display_name
+            )?;
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
