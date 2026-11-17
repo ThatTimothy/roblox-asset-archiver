@@ -294,20 +294,7 @@ async fn download_asset_version(
         .context(format!(
             "Failed to get asset delivery url for version {version}"
         ))?;
-
-    // Asset metadata contains uncompressed length as attribute 1, this is undocumented so do not rely but fine for now
-    let uncompressed_length = match delivery_response.asset_metadatas {
-        Some(asset_metadatas) => asset_metadatas
-            .iter()
-            .find(|asset_metadata| asset_metadata.metadata_type == 1)
-            .map(|asset_metadata| {
-                asset_metadata
-                    .value
-                    .parse()
-                    .expect("Invalid asset attribute")
-            }),
-        None => None,
-    };
+    let uncompressed_length = delivery_response.uncompressed_length();
 
     // Make request, raw_get so content can be streamed to file
     debug!("Got delivery URL for {id} version {version}, making request");

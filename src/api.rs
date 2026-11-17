@@ -298,8 +298,28 @@ pub struct AssetDeliveryMetadata {
 #[serde(rename_all = "camelCase")]
 pub struct AssetDeliveryResponse {
     pub location: String,
-    /// If exists, assetMetadataType == 1 is the uncompressed length in bytes
+    /// Undocumented: metadataType == 1 is the uncompressed length in bytes
     pub asset_metadatas: Option<Vec<AssetDeliveryMetadata>>,
+}
+
+impl AssetDeliveryResponse {
+    /// Get the uncompressed length of the asset, if specified
+    /// Relies on undocumented behavior, so no assumptions made
+    pub fn uncompressed_length(&self) -> Option<u64> {
+        match &self.asset_metadatas {
+            Some(asset_metadatas) => asset_metadatas
+                .iter()
+                // metadataType == 1 is uncompressed length in bytes
+                .find(|asset_metadata| asset_metadata.metadata_type == 1)
+                .map(|asset_metadata| {
+                    asset_metadata
+                        .value
+                        .parse()
+                        .expect("Invalid asset attribute")
+                }),
+            None => None,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
