@@ -18,7 +18,7 @@ use tokio::{
 };
 
 use crate::{
-    api::{AssetDeliveryResponse, AssetType, Client},
+    api::{AssetType, Client},
     cli::DownloadOptions,
     progress::{Progress, message},
     state::{State, StateVersion, StateVersionMetadata},
@@ -91,99 +91,6 @@ async fn file_extension(asset_type: &AssetType, path: &Path) -> Result<&'static 
     };
 
     Ok(extension)
-}
-
-/// Downloads to a file by streaming response into it.
-///
-/// First, downloads to `{prefix_path}.temp` - this ensures that partial downloads are always `.temp`.
-/// Then, moves to proper file extension after download is complete.
-/// As such, `prefix_path` should not have an extension since it will be overridden.
-///
-/// Returns the final path
-async fn download_to_file(
-    bar: &ProgressBar,
-    client: &Client,
-    delivery_response: AssetDeliveryResponse,
-    asset_type: &AssetType,
-    prefix_path: &Path,
-) -> Result<PathBuf> {
-    // Asset metadata contains uncompressed length as attribute 1, this is undocumented so do not rely but fine for now
-    let uncompressed_length = match delivery_response.asset_metadatas {
-        Some(asset_metadatas) => asset_metadatas
-            .iter()
-            .find(|asset_metadata| asset_metadata.metadata_type == 1)
-            .map(|asset_metadata| {
-                asset_metadata
-                    .value
-                    .parse()
-                    .expect("Invalid asset attribute")
-            }),
-        None => None,
-    };
-
-    // Make request, raw_get so content can be streamed to file
-    let mut response = client
-        .raw_get("asset_download".to_owned(), delivery_response.location)
-        .await?;
-
-    // Use progress bar if length defined, otherwise a spinner
-    if uncompressed_length.is_some() {
-        bar.set_length(uncompressed_length.unwrap());
-        bar.set_style(
-            ProgressStyle::with_template(
-                "[{elapsed_precise}] [{bar:30.green}] {bytes}/{total_bytes} at {bytes_per_sec} ({eta}) • {msg}",
-            )
-            .unwrap(),
-        )
-    } else {
-        bar.set_style(
-            ProgressStyle::with_template(
-                "{spinner:.blue} {msg}, {bytes} downloaded ({bytes_per_sec})",
-            )
-            .unwrap(),
-        )
-    }
-    bar.set_position(0);
-    bar.set_elapsed(Duration::ZERO);
-    bar.set_message(format!("Downloading to `{}`", prefix_path.display()));
-
-    // Stream to temp path use BufWriter
-    let temp_path = prefix_path.with_extension("temp");
-    debug!("Start streaming content to `{}`", temp_path.display());
-    {
-        let file = File::create(&temp_path).await?;
-        let mut writer = BufWriter::new(file);
-        while let Some(item) = response.chunk().await? {
-            bar.inc(item.len() as u64);
-            writer.write_all(&item).await?;
-        }
-        writer.flush().await?;
-    }
-    debug!("Streamed content to {}", &temp_path.display());
-
-    // Commit by renaming to proper extension
-    let extension = file_extension(asset_type, &temp_path)
-        .await
-        .with_context(|| {
-            format!(
-                "Failed to determine file extension for {}",
-                temp_path.display()
-            )
-        })?;
-    let file_path = prefix_path.with_extension(extension);
-    fs::rename(&temp_path, &file_path).await.with_context(|| {
-        format!(
-            "Failed to commit rename from {} to {}",
-            &temp_path.display(),
-            &file_path.display()
-        )
-    })?;
-    debug!(
-        "Committed content from {} to {}",
-        &temp_path.display(),
-        &file_path.display()
-    );
-    Ok(file_path)
 }
 
 async fn get_asset_and_universe(
@@ -364,6 +271,110 @@ async fn get_versions(
     Ok(())
 }
 
+/// Downloads to an asset version to a file
+///
+/// First, contacts asset delivery to find cdn url.
+/// Then, downloads to `{prefix_path}.temp` - this ensures that partial downloads are always `.temp`.
+/// Next, moves to proper file extension after download is complete.
+/// As such, `prefix_path` should not have an extension since it will be overridden.
+///
+/// Returns the final path
+async fn download_asset_version(
+    bar: &ProgressBar,
+    client: &Client,
+    id: u64,
+    version: u64,
+    asset_type: &AssetType,
+    prefix_path: &Path,
+) -> Result<PathBuf> {
+    debug!("Getting asset delivery url for {id} version {version}");
+    let delivery_response = client
+        .asset_version_delivery(id, version)
+        .await
+        .context(format!(
+            "Failed to get asset delivery url for version {version}"
+        ))?;
+
+    // Asset metadata contains uncompressed length as attribute 1, this is undocumented so do not rely but fine for now
+    let uncompressed_length = match delivery_response.asset_metadatas {
+        Some(asset_metadatas) => asset_metadatas
+            .iter()
+            .find(|asset_metadata| asset_metadata.metadata_type == 1)
+            .map(|asset_metadata| {
+                asset_metadata
+                    .value
+                    .parse()
+                    .expect("Invalid asset attribute")
+            }),
+        None => None,
+    };
+
+    // Make request, raw_get so content can be streamed to file
+    debug!("Got delivery URL for {id} version {version}, making request");
+    let mut response = client
+        .raw_get("asset_download".to_owned(), delivery_response.location)
+        .await?;
+
+    // Use progress bar if length defined, otherwise a spinner
+    if uncompressed_length.is_some() {
+        bar.set_length(uncompressed_length.unwrap());
+        bar.set_style(
+            ProgressStyle::with_template(
+                "[{elapsed_precise}] [{bar:30.green}] {bytes}/{total_bytes} at {bytes_per_sec} ({eta}) • {msg}",
+            )
+            .unwrap(),
+        )
+    } else {
+        bar.set_style(
+            ProgressStyle::with_template(
+                "{spinner:.blue} {msg}, {bytes} downloaded ({bytes_per_sec})",
+            )
+            .unwrap(),
+        )
+    }
+    bar.set_position(0);
+    bar.set_elapsed(Duration::ZERO);
+    bar.set_message(format!("Downloading to `{}`", prefix_path.display()));
+
+    // Stream to temp path use BufWriter
+    let temp_path = prefix_path.with_extension("temp");
+    debug!("Start streaming content to `{}`", temp_path.display());
+    {
+        let file = File::create(&temp_path).await?;
+        let mut writer = BufWriter::new(file);
+        while let Some(item) = response.chunk().await? {
+            bar.inc(item.len() as u64);
+            writer.write_all(&item).await?;
+        }
+        writer.flush().await?;
+    }
+    debug!("Streamed content to {}", &temp_path.display());
+
+    // Commit by renaming to proper extension
+    let extension = file_extension(asset_type, &temp_path)
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to determine file extension for {}",
+                temp_path.display()
+            )
+        })?;
+    let file_path = prefix_path.with_extension(extension);
+    fs::rename(&temp_path, &file_path).await.with_context(|| {
+        format!(
+            "Failed to commit rename from {} to {}",
+            &temp_path.display(),
+            &file_path.display()
+        )
+    })?;
+    debug!(
+        "Committed content from {} to {}",
+        &temp_path.display(),
+        &file_path.display()
+    );
+    Ok(file_path)
+}
+
 async fn download_asset(
     progress: Progress,
     client: Client,
@@ -468,24 +479,16 @@ async fn download_asset(
                     break;
                 }
                 let (version, asset_type, file_prefix_path) = &to_download[download_index];
-
-                debug!("Downloading version {version}");
-                let delivery_response =
-                    client
-                        .asset_version_delivery(id, *version)
-                        .await
-                        .context(format!(
-                            "Failed to get asset delivery url for version {version}"
-                        ))?;
-                debug!("Got delivery URL for version {version}, starting download",);
-                let file_path = download_to_file(
+                let file_path = download_asset_version(
                     &file_bar,
                     &client,
-                    delivery_response,
+                    id,
+                    *version,
                     asset_type,
-                    &file_prefix_path,
+                    file_prefix_path,
                 )
                 .await?;
+
                 bar.inc(1);
                 progress.print(format!(
                     "Downloaded version {} to `{}`",
