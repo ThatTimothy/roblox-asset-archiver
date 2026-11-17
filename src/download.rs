@@ -303,8 +303,8 @@ async fn download_asset_version(
         .await?;
 
     // Use progress bar if length defined, otherwise a spinner
-    if uncompressed_length.is_some() {
-        bar.set_length(uncompressed_length.unwrap());
+    if let Some(uncompressed_length) = uncompressed_length {
+        bar.set_length(uncompressed_length);
         bar.set_style(
             ProgressStyle::with_template(
                 "[{elapsed_precise}] [{bar:30.green}] {bytes}/{total_bytes} at {bytes_per_sec} ({eta}) • {msg}",
@@ -314,7 +314,7 @@ async fn download_asset_version(
     } else {
         bar.set_style(
             ProgressStyle::with_template(
-                "{spinner:.blue} {msg}, {bytes} downloaded ({bytes_per_sec})",
+                "{spinner:.blue} {msg}, {bytes} downloaded ({bytes_per_sec}) • {msg}",
             )
             .unwrap(),
         )
