@@ -1,45 +1,116 @@
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashMap},
     fmt::Write,
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
 };
 
-use anyhow::{Context, Error, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
 use log::{debug, trace, warn};
 use tokio::{
     fs::{self, File},
     io::{AsyncReadExt, AsyncWriteExt, BufWriter},
+    task::JoinHandle,
 };
 
 use crate::{
     api::{AssetType, Client},
     cli::DownloadOptions,
     progress::{Progress, message},
-    state::{State, StateAsset, StateVersion, StateVersionMetadata},
+    state::{Downloaded, State, StateAsset, Version},
 };
 
 const TEMP_FILE_EXTENSION: &str = "temp";
 
-async fn get_asset(progress: &Progress, client: &Client, state: &mut State) -> Result<()> {
-    // If it is defined, resuming and no work to be done
-    if state.asset.is_some() {
-        return Ok(());
+/// Util to run `tasks` on `concurrent` workers that call `worker` with `progress, client, bar, task`.
+/// Handles creating & updating `overall` progress.
+/// `bar` is provided and shared for a worker to prevent flicking/reordering of bars.
+async fn run_concurrent_with_progress<T, W, WFut, R>(
+    progress: Arc<Progress>,
+    client: Arc<Client>,
+    concurrent: usize,
+    overall_style: ProgressStyle,
+    overall_extra: usize,
+    tasks: Vec<T>,
+    worker: W,
+) -> Result<Vec<R>>
+where
+    T: Clone + Send + Sync + 'static,
+    W: Fn(Arc<Progress>, Arc<Client>, Arc<ProgressBar>, T) -> WFut + Send + Sync + 'static,
+    R: std::fmt::Debug + Send + Sync + 'static,
+    WFut: Future<Output = Result<R>> + Send + Sync + 'static,
+{
+    let concurrent = concurrent.min(tasks.len());
+    let mut handles: Vec<JoinHandle<Result<()>>> = Vec::with_capacity(concurrent);
+    let next = Arc::new(AtomicUsize::new(0));
+    let worker = Arc::new(worker);
+    let tasks = Arc::new(tasks);
+    let results: Arc<Vec<OnceLock<R>>> =
+        Arc::new((0..tasks.len()).map(|_| OnceLock::new()).collect());
+
+    let overall = progress.add(
+        ProgressBar::new((tasks.len() + overall_extra) as u64)
+            .with_style(overall_style)
+            .with_finish(ProgressFinish::AndLeave),
+    );
+    overall.set_position(overall_extra as u64);
+    overall.enable_steady_tick(Duration::from_millis(100));
+
+    for _ in 0..concurrent {
+        let progress = progress.clone();
+        let client = client.clone();
+        let next = next.clone();
+        let worker = worker.clone();
+        let tasks = tasks.clone();
+        let results = results.clone();
+        let overall = overall.clone();
+        let handle = tokio::spawn(async move {
+            let bar = Arc::new(
+                progress
+                    .add(ProgressBar::new_spinner().with_style(
+                        ProgressStyle::with_template("{spinner:.blue} {msg}").unwrap(),
+                    )),
+            );
+            bar.enable_steady_tick(Duration::from_millis(100));
+            loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                if i >= tasks.len() {
+                    // No more work to do
+                    break;
+                }
+
+                let task = tasks[i].clone();
+                let result = worker(progress.clone(), client.clone(), bar.clone(), task).await?;
+                results[i].set(result).unwrap();
+                overall.inc(1);
+            }
+            bar.finish_and_clear();
+
+            Ok(())
+        });
+        handles.push(handle);
     }
 
-    let spinner = progress.add(
-        ProgressBar::new_spinner()
-            .with_style(ProgressStyle::with_template("{spinner:.blue} {msg}").unwrap()),
-    );
-    spinner.enable_steady_tick(Duration::from_millis(100));
+    for handle in handles {
+        handle.await??
+    }
 
+    let results = Arc::try_unwrap(results)
+        .unwrap()
+        .into_iter()
+        .map(|result| result.into_inner().unwrap())
+        .collect();
+    Ok(results)
+}
+
+/// Gets a single asset
+async fn get_asset(client: &Client, spinner: &ProgressBar, id: u64) -> Result<StateAsset> {
     // Get asset information
-    let id = state.id;
     message!(spinner, "Fetching {id}");
     let asset = client
         .asset(id)
@@ -96,42 +167,84 @@ async fn get_asset(progress: &Progress, client: &Client, state: &mut State) -> R
         asset,
         place,
         universe,
+        versions: None,
+        downloaded: None,
     };
-    progress.print(format!("Found {state_asset:#}"));
 
-    // Update and save state
-    state.asset = Some(state_asset);
+    Ok(state_asset)
+}
+
+/// Gets all the assets that are not yet fetched
+async fn get_all_assets(
+    progress: Arc<Progress>,
+    client: Arc<Client>,
+    state: &mut State,
+    options: &DownloadOptions,
+) -> Result<()> {
+    let to_fetch = state
+        .ids
+        .iter()
+        .filter(|id| !state.assets.contains_key(id))
+        .copied()
+        .collect::<Vec<_>>();
+
+    // If nothing to fetch, no work to be done
+    if to_fetch.len() == 0 {
+        return Ok(());
+    }
+
+    // Fetch missing assets concurrently
+    let overall_style = ProgressStyle::with_template(
+        "[{elapsed_precise}] [{bar:30.cyan/blue}] {pos}/{len} ({eta}) • Fetching assets at {per_sec}",
+    )
+    .unwrap()
+    .with_key(
+        "per_sec",
+        |state: &indicatif::ProgressState, w: &mut dyn Write| {
+            write!(w, "{:.2}/s", state.per_sec()).unwrap()
+        },
+    );
+    let assets = run_concurrent_with_progress(
+        progress,
+        client,
+        options.concurrent,
+        overall_style,
+        state.ids.len() - to_fetch.len(),
+        to_fetch.clone(),
+        move |progress, client, spinner, id| async move {
+            let state_asset = get_asset(&client, &spinner, id).await?;
+            progress.print(format!("Found {state_asset:#}"));
+            Ok(state_asset)
+        },
+    )
+    .await?;
+
+    // Save assets
+    for (id, asset) in to_fetch.iter().zip(assets) {
+        state.assets.insert(*id, asset);
+    }
     state.save().context("Failed to save state")?;
 
     Ok(())
 }
 
-async fn get_versions(progress: &Progress, client: &Client, state: &mut State) -> Result<()> {
-    // If defined, resuming and no work to be done
-    if state.versions.is_some() {
-        return Ok(());
-    }
-
-    let spinner = progress.add(
-        ProgressBar::new_spinner()
-            .with_style(ProgressStyle::with_template("{spinner:.blue} {msg}").unwrap()),
-    );
-    spinner.enable_steady_tick(Duration::from_millis(100));
-    // Download version metadata
-    let id = state.id;
-    let state_asset = state.asset.as_ref().unwrap();
-    let versions_metadata: Vec<StateVersionMetadata> = match state_asset.asset.asset_type {
+/// Gets the versions for a specific asset
+async fn get_asset_versions(
+    client: &Client,
+    spinner: &ProgressBar,
+    id: u64,
+    asset_type: &AssetType,
+    asset_display: &str,
+) -> Result<BTreeMap<u64, Version>> {
+    // Get versions
+    let versions = match asset_type {
         AssetType::Place => {
             // Place versions have a special endpoint that includes publish notes
-            message!(spinner, "Fetching place version metadata for {state_asset}");
+            message!(spinner, "Fetching place versions info for {asset_display}");
             let place_versions = client
                 .place_versions(id)
                 .await
-                .context("Failed to fetch place versions metadata")?;
-            progress.print(format!(
-                "Got place version metadata for {state_asset}: {} versions",
-                place_versions.len()
-            ));
+                .context("Failed to fetch place versions info")?;
 
             // Version does not always have creator - this seems to happen with version 1 specifically but generalized here
             // If the version does not have a creator, the safe default is the first creator in all versions
@@ -157,48 +270,93 @@ async fn get_versions(progress: &Progress, client: &Client, state: &mut State) -
                 }
             }
 
-            let versions_metadata = place_versions
+            place_versions
                 .into_iter()
                 .rev()
-                .map(|place_version| StateVersionMetadata::Place(place_version))
-                .collect();
-            versions_metadata
+                .map(|place_version| (place_version.version(), Version::Place(place_version)))
+                .collect()
         }
         _ => {
             // Every other type uses standard asset versions
-            message!(spinner, "Fetching asset version metadata for {state_asset}");
+            message!(spinner, "Fetching asset versions info for {asset_display}");
             let asset_versions = client
                 .asset_versions(id)
                 .await
-                .context("Failed to fetch asset version metadata")?;
-            progress.print(format!(
-                "Got asset version metadata for {state_asset}: {} versions",
-                asset_versions.len()
-            ));
+                .context("Failed to fetch asset versions info")?;
 
-            let versions_metadata = asset_versions
+            asset_versions
                 .into_iter()
                 .rev()
-                .map(|asset_version| StateVersionMetadata::Asset(asset_version))
-                .collect();
-            versions_metadata
+                .map(|asset_version| (asset_version.version(), Version::Asset(asset_version)))
+                .collect()
         }
     };
 
-    let version_padding = versions_metadata.len().to_string().len();
-    let versions = versions_metadata
-        .into_iter()
-        .map(|version_metadata| {
-            let version = version_metadata.version();
-            StateVersion {
-                version,
-                metadata: version_metadata,
-                file_prefix: format!("v{version:0version_padding$}"),
-            }
+    Ok(versions)
+}
+
+async fn get_all_versions(
+    progress: Arc<Progress>,
+    client: Arc<Client>,
+    state: &mut State,
+    options: &DownloadOptions,
+) -> Result<()> {
+    let to_fetch = state
+        .assets
+        .iter()
+        .filter_map(|(id, asset)| asset.versions.is_none().then_some(*id))
+        .collect::<Vec<_>>();
+
+    // If nothing to fetch, no work to be done
+    if to_fetch.len() == 0 {
+        return Ok(());
+    }
+
+    // Fetch missing asset versions concurrently
+    let overall_style = ProgressStyle::with_template(
+        "[{elapsed_precise}] [{bar:30.cyan/blue}] {pos}/{len} ({eta}) • Fetching versions info at {per_sec}",
+    )
+    .unwrap()
+    .with_key(
+        "per_sec",
+        |state: &indicatif::ProgressState, w: &mut dyn Write| {
+            write!(w, "{:.2}/s", state.per_sec()).unwrap()
+        },
+    );
+    let tasks = to_fetch
+        .iter()
+        .map(|id| {
+            let state_asset = state.assets.get(id).unwrap();
+            (
+                *id,
+                state_asset.asset.asset_type.clone(),
+                format!("{state_asset}"),
+            )
         })
         .collect();
-    // Update and save state
-    state.versions = Some(versions);
+    let versions = run_concurrent_with_progress(
+        progress,
+        client,
+        options.concurrent,
+        overall_style,
+        state.assets.len() - to_fetch.len(),
+        tasks,
+        move |progress, client, spinner, (id, asset_type, asset_display)| async move {
+            let versions =
+                get_asset_versions(&client, &spinner, id, &asset_type, &asset_display).await?;
+            progress.print(format!(
+                "Got asset version metadata for {asset_display}: {} versions",
+                versions.len()
+            ));
+            Ok(versions)
+        },
+    )
+    .await?;
+
+    // Save assets
+    for (id, versions) in to_fetch.iter().zip(versions) {
+        state.assets.get_mut(id).unwrap().versions = Some(versions);
+    }
     state.save().context("Failed to save state")?;
 
     Ok(())
@@ -246,8 +404,8 @@ async fn file_extension(asset_type: &AssetType, path: &Path) -> Result<&'static 
 ///
 /// Returns the final path
 async fn download_asset_version(
-    bar: &ProgressBar,
     client: &Client,
+    bar: &ProgressBar,
     id: u64,
     version: u64,
     asset_type: &AssetType,
@@ -328,72 +486,108 @@ async fn download_asset_version(
     Ok(file_path)
 }
 
-async fn download_asset(
-    progress: Progress,
-    client: Client,
-    state: State,
-    options: &DownloadOptions,
-) -> Result<()> {
-    assert!(state.versions.is_some());
+/// Removes leftover temp files & returns existing file prefixes mapped to their file name
+async fn remove_temp_and_get_existing(dir: &Path) -> Result<HashMap<String, String>> {
+    let mut existing = HashMap::new();
 
-    // Remove temp files & store existing file prefixes
-    let mut existing = HashSet::new();
-    for entry in state.output.read_dir()? {
+    for entry in dir.read_dir()? {
         if let Ok(entry) = entry {
             let path = entry.path();
 
-            // Remove any temp files
             if let Some(extension) = entry.path().extension()
                 && extension == TEMP_FILE_EXTENSION
             {
+                // Remove any temp files
                 fs::remove_file(entry.path()).await.with_context(|| {
                     format!("Failed to remove temp file {}", entry.path().display())
                 })?;
-            } else if let Some(file_prefix) = path.file_prefix()
+            } else if let Some(file_name) = path.file_name()
+                && let Some(file_name) = file_name.to_str()
+                && let Some(file_prefix) = path.file_prefix()
                 && let Some(file_prefix) = file_prefix.to_str()
             {
                 // If not a temp file, store the file prefix
-                existing.insert(file_prefix.to_owned());
+                existing.insert(file_prefix.to_owned(), file_name.to_owned());
             }
         }
     }
 
+    Ok(existing)
+}
+
+async fn download_all_assets(
+    progress: Arc<Progress>,
+    client: Arc<Client>,
+    state: &mut State,
+    options: &DownloadOptions,
+) -> Result<()> {
     // Only download files within versions bounds and do not already exist
-    let id = state.id;
-    let state_asset = state.asset.as_ref().unwrap();
-    let state_versions = state.versions.as_ref().unwrap();
-    let num_versions = state_versions.len();
-    let mut min = 1usize;
-    let mut max = num_versions;
-    if let Some(first) = options.first {
-        max = first.get().min(num_versions);
-    } else if let Some(last) = options.last {
-        min = num_versions - (last.get().min(num_versions)) + 1;
-    }
-    let num_selected = max - min + 1;
     let mut to_download = Vec::new();
-    for state_version in &state_versions[min - 1..=max - 1] {
-        let file_prefix = &state_version.file_prefix;
-        if !existing.contains(file_prefix) {
-            let file_prefix_path = state.output.join(file_prefix);
-            to_download.push((
-                state_version.version,
-                state_asset.asset.asset_type.clone(),
-                file_prefix_path,
-            ));
+    let mut num_selected = 0;
+    for (id, state_asset) in &mut state.assets {
+        let state_versions = state_asset.versions.as_ref().unwrap();
+
+        let downloaded_path =
+            PathBuf::from(format!("{}", state_asset.asset.asset_type)).join(format!("{id}"));
+        let output_path = state.output.join(&downloaded_path);
+        fs::create_dir_all(&output_path).await.with_context(|| {
+            format!("Failed to create directories for {}", output_path.display())
+        })?;
+        if state_asset.downloaded.is_none() {
+            state_asset.downloaded = Some(Downloaded {
+                path: downloaded_path.to_string_lossy().to_string(),
+                filenames: BTreeMap::new(),
+            });
         }
+        let downloaded = state_asset.downloaded.as_mut().unwrap();
+        let existing = remove_temp_and_get_existing(&output_path).await?;
+
+        let num_versions = state_versions.len();
+        let version_padding = num_versions.to_string().len();
+
+        let mut min = 1usize;
+        let mut max = num_versions;
+        if let Some(first) = options.first {
+            max = first.get().min(num_versions);
+        } else if let Some(last) = options.last {
+            min = num_versions - (last.get().min(num_versions)) + 1;
+        }
+
+        for version in min..=max {
+            let file_prefix = format!("v{version:0version_padding$}");
+
+            // If it doesn't exist, we need to download it
+            if !existing.contains_key(&file_prefix) {
+                let file_prefix_path = output_path.join(file_prefix);
+                to_download.push((
+                    *id,
+                    version as u64,
+                    state_asset.asset.asset_type.clone(),
+                    file_prefix_path,
+                ));
+            } else {
+                // Otherwise, mark downloaded since we already have the file
+                downloaded
+                    .filenames
+                    .insert(version as u64, existing.get(&file_prefix).unwrap().clone());
+            }
+        }
+
+        num_selected += max - min + 1;
     }
     trace!("To download: {:?}", to_download);
 
+    // Check if already done
     let num_to_download = to_download.len();
-
     if num_to_download == 0 {
         progress.print("All versions already downloaded");
         return Ok(());
     }
 
+    // Otherwise, concurrently download all versions
     progress.print(format!(
-        "Downloading {num_to_download} versions for {state_asset} to `{}`{}",
+        "Downloading {num_to_download} versions of {} assets to `{}`{}",
+        state.assets.len(),
         state.output.display(),
         if num_selected > num_to_download {
             format!(
@@ -405,75 +599,67 @@ async fn download_asset(
         }
     ));
 
-    let bar = progress.add(
-                ProgressBar::new(num_selected as u64)
-                    .with_style(
-                        ProgressStyle::with_template(
-                            "[{elapsed_precise}] [{bar:30.cyan/blue}] {pos}/{len} ({eta}) • Downloading {per_sec}",
-                        )
-                        .unwrap().with_key("per_sec", |state: &indicatif::ProgressState, w: &mut dyn Write| write!(w, "{:.2} ver/s", state.per_sec()).unwrap()),
-                    )
-                    .with_finish(ProgressFinish::AndClear),
-            );
-    bar.set_position((num_selected - num_to_download) as u64);
+    let overall_style = ProgressStyle::with_template(
+        "[{elapsed_precise}] [{bar:30.cyan/blue}] {pos}/{len} ({eta}) • Downloading {per_sec}",
+    )
+    .unwrap()
+    .with_key(
+        "per_sec",
+        |state: &indicatif::ProgressState, w: &mut dyn Write| {
+            write!(w, "{:.2} ver/s", state.per_sec()).unwrap()
+        },
+    );
+    let downloaded_locations = run_concurrent_with_progress(
+        progress.clone(),
+        client,
+        options.concurrent,
+        overall_style,
+        num_selected - num_to_download,
+        to_download,
+        move |progress, client, spinner, (id, version, asset_type, file_prefix_path)| async move {
+            let file_path = download_asset_version(
+                &client,
+                &spinner,
+                id,
+                version,
+                &asset_type,
+                &file_prefix_path,
+            )
+            .await?;
 
-    let concurrent = options.concurrent.min(num_to_download);
-    let mut handles = Vec::new();
-    let progress = Arc::new(progress);
-    let next_download_index = Arc::new(AtomicUsize::new(0));
-    let to_download = Arc::new(to_download);
-    let bar = Arc::new(bar);
-    let client = Arc::new(client);
-    for _ in 0..concurrent {
-        let progress = Arc::clone(&progress);
-        let next_download_index = Arc::clone(&next_download_index);
-        let to_download = Arc::clone(&to_download);
-        let bar = Arc::clone(&bar);
-        let client = Arc::clone(&client);
+            progress.print(format!(
+                "Downloaded {id} version {} to `{}`",
+                version,
+                file_path.display()
+            ));
 
-        let handle = tokio::spawn(async move {
-            let file_bar =
-                progress.add(ProgressBar::new_spinner().with_finish(ProgressFinish::AndClear));
-            loop {
-                // Ordering does not matter, but we need to have one thread do change at a time
-                let download_index = next_download_index.fetch_add(1, Ordering::Relaxed);
-                if download_index >= num_to_download {
-                    // No more work to do
-                    break;
-                }
-                let (version, asset_type, file_prefix_path) = &to_download[download_index];
-                let file_path = download_asset_version(
-                    &file_bar,
-                    &client,
-                    id,
-                    *version,
-                    asset_type,
-                    file_prefix_path,
-                )
-                .await?;
-
-                bar.inc(1);
-                progress.print(format!(
-                    "Downloaded version {} to `{}`",
-                    version,
-                    file_path.display()
-                ));
-            }
-
-            Ok::<(), Error>(())
-        });
-
-        handles.push(handle);
-    }
-
-    for handle in handles {
-        handle.await??
-    }
+            Ok((id, version, file_path))
+        },
+    )
+    .await?;
 
     progress.print(format!(
-        "Downloaded {num_selected} versions of {state_asset} to `{}`",
+        "Downloaded {num_selected} versions of {} assets to `{}`",
+        state.assets.len(),
         state.output.display()
     ));
+
+    // Save downloaded locations
+    for (id, version, file_path) in downloaded_locations {
+        let filenames = &mut state
+            .assets
+            .get_mut(&id)
+            .unwrap()
+            .downloaded
+            .as_mut()
+            .unwrap()
+            .filenames;
+        filenames.insert(
+            version,
+            file_path.file_name().unwrap().to_string_lossy().to_string(),
+        );
+    }
+    state.save().context("Failed to save state")?;
 
     Ok(())
 }
@@ -508,28 +694,31 @@ pub async fn download(
             .join(", "),
     );
 
-    let State { id, references, .. } = state;
+    let State { references, .. } = state;
 
     if references {
         todo!()
     }
 
     // Output resuming or preparing based on existing asset information
-    if let Some(state_asset) = &state.asset {
-        eprintln!(
-            "Resuming download for {state_asset:#} to `{}` with references={references}",
-            state.output.display()
-        );
+    if !state.assets.is_empty() {
+        // eprintln!(
+        //     "Resuming download for {state_asset:#} to `{}` with references={references}",
+        //     state.output.display()
+        // );
     } else {
-        eprintln!(
-            "Preparing download for {id} to `{}` with references={references}",
-            state.output.display()
-        );
+        // eprintln!(
+        //     "Preparing download for {id} to `{}` with references={references}",
+        //     state.output.display()
+        // );
     }
 
-    get_asset(&progress, &client, &mut state).await?;
-    get_versions(&progress, &client, &mut state).await?;
-    download_asset(progress, client, state, &options).await?;
+    let progress = Arc::new(progress);
+    let client = Arc::new(client);
+
+    get_all_assets(progress.clone(), client.clone(), &mut state, &options).await?;
+    get_all_versions(progress.clone(), client.clone(), &mut state, &options).await?;
+    download_all_assets(progress, client, &mut state, &options).await?;
 
     Ok(())
 }

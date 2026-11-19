@@ -52,12 +52,13 @@ enum DownloadCommand {
     ///
     /// Supports: Place, Model, Plugin, Audio, Decal, Image, Video, Mesh, MeshPart, Animation, all clothing items, all animation avatar items
     Asset {
-        /// The id of the asset to download
-        id: u64,
+        /// The id of the asset to download (can pass multiple)
+        #[arg(required = true, value_delimiter = ',')]
+        ids: Vec<u64>,
 
-        /// The directory to output downloads [default: output_{id}]
-        #[arg(short, long)]
-        output: Option<PathBuf>,
+        /// The directory to output downloads
+        #[arg(short, long, default_value = "output")]
+        output: PathBuf,
 
         /// Also download asset's references (Images, Meshes, MeshParts, Audios, Videos, Animations within it)
         #[arg(short, long)]
@@ -136,10 +137,7 @@ pub(crate) async fn run() -> Result<(), Error> {
                         }
                     }
                 }
-                DownloadCommand::Asset { output, id, .. } => match output {
-                    Some(output) => output.clone(),
-                    None => PathBuf::from(format!("output_{id}")),
-                },
+                DownloadCommand::Asset { output, .. } => output.clone(),
             };
             let existing_state = State::load(&output).context("Failed to load state")?;
 
@@ -154,13 +152,13 @@ pub(crate) async fn run() -> Result<(), Error> {
                     Some(state) => download(progress, client, state, options).await,
                 },
                 DownloadCommand::Asset {
-                    id,
+                    ids,
                     references,
                     options,
                     ..
                 } => {
                     if let Some(existing_state) = existing_state {
-                        if existing_state.id == id && existing_state.references == references {
+                        if existing_state.ids == ids && existing_state.references == references {
                             return download(progress, client, existing_state, options).await;
                         }
                         bail!(
@@ -179,7 +177,7 @@ pub(crate) async fn run() -> Result<(), Error> {
                     download(
                         progress,
                         client,
-                        State::new(id, references, output),
+                        State::new(ids, references, output),
                         options,
                     )
                     .await

@@ -1,4 +1,5 @@
 use std::{
+    collections::{BTreeMap, HashMap},
     fmt::Display,
     fs::{self, File},
     io::{BufReader, BufWriter, Write},
@@ -11,11 +12,27 @@ use serde::{Deserialize, Serialize};
 use crate::api::{Asset, AssetVersion, Place, PlaceVersion, Universe};
 
 #[derive(Serialize, Deserialize, Debug)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum Version {
+    Place(PlaceVersion),
+    Asset(AssetVersion),
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Downloaded {
+    pub path: String,
+    pub filenames: BTreeMap<u64, String>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct StateAsset {
     pub asset: Asset,
     pub place: Option<Place>,
     pub universe: Option<Universe>,
+    pub versions: Option<BTreeMap<u64, Version>>,
+    pub downloaded: Option<Downloaded>,
 }
 
 impl Display for StateAsset {
@@ -43,37 +60,12 @@ impl Display for StateAsset {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-pub enum StateVersionMetadata {
-    Place(PlaceVersion),
-    Asset(AssetVersion),
-}
-
-impl StateVersionMetadata {
-    pub fn version(&self) -> u64 {
-        match self {
-            Self::Place(place_version) => place_version.version(),
-            Self::Asset(asset_version) => asset_version.version(),
-        }
-    }
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct StateVersion {
-    pub version: u64,
-    pub metadata: StateVersionMetadata,
-    pub file_prefix: String,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct State {
     schema_version: String,
-    pub id: u64,
+    pub ids: Vec<u64>,
     pub references: bool,
-    pub asset: Option<StateAsset>,
-    pub versions: Option<Vec<StateVersion>>,
+    pub assets: HashMap<u64, StateAsset>,
 
     #[serde(skip)]
     pub output: PathBuf,
@@ -83,13 +75,12 @@ impl State {
     pub const STATE_FILENAME: &str = concat!(env!("CARGO_PKG_NAME"), ".json");
     pub const STATE_SCHEMA_VERSION: &str = concat!(env!("CARGO_PKG_NAME"), ":", "1");
 
-    pub fn new(id: u64, references: bool, output: PathBuf) -> Self {
+    pub fn new(ids: Vec<u64>, references: bool, output: PathBuf) -> Self {
         Self {
             schema_version: Self::STATE_SCHEMA_VERSION.to_owned(),
-            id,
+            ids,
             references,
-            asset: None,
-            versions: None,
+            assets: HashMap::new(),
             output,
         }
     }

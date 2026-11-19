@@ -825,7 +825,7 @@ impl Client {
     ///
     /// Requires asset:read
     ///
-    /// Docs: https://create.roblox.com/docs/cloud/reference/features/assets#listAssetVersions
+    /// Docs: https://create.roblox.com/docs/cloud/reference/features/assets#Assets_ListAssetVersions
     ///
     /// Note: inconsistent with docs, see https://devforum.roblox.com/t/listassetversions-example-is-completely-wrong/4976456
     pub async fn asset_versions(&self, asset_id: u64) -> Result<Vec<AssetVersion>> {
