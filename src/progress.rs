@@ -1,9 +1,10 @@
-use std::ops::Deref;
+use std::{fmt::Write, ops::Deref};
 
 use env_logger::Logger;
-use indicatif::MultiProgress;
+use indicatif::{MultiProgress, ProgressBar, ProgressState, ProgressStyle};
 use indicatif_log_bridge::LogWrapper;
 
+/// Wrapper of [MultiProgress] that contains utility methods & styles
 pub struct Progress {
     pub multi: MultiProgress,
 }
@@ -19,8 +20,8 @@ impl Progress {
         Self { multi }
     }
 
-    /// Prints to stderr without conflicting with progress bar
-    /// Cannot just use println as that disappears when progress bar is hidden
+    /// Prints to stderr without conflicting with progress bar.
+    /// Cannot just use println as that disappears when progress bar is hidden.
     pub fn print(&self, message: impl AsRef<str>) {
         // println does not output if bar is hidden (when outputting to non-tty like file)
         // suspend causes a re-draw each time which results in flickering
@@ -30,6 +31,64 @@ impl Progress {
         } else {
             self.println(message.as_ref()).expect("Failed to print");
         }
+    }
+
+    /// Adds a basic spinner
+    pub fn add_spinner(&self, primary: bool) -> ProgressBar {
+        self.add(ProgressBar::new_spinner().with_style(Progress::spinner_style(primary)))
+    }
+
+    /// Adds a basic bar
+    pub fn add_bar(&self, len: u64, primary: bool, bytes: bool) -> ProgressBar {
+        self.add(ProgressBar::new(len).with_style(Progress::bar_style(primary, bytes)))
+    }
+
+    /// Shared function for determining spinner element
+    fn spinner_element(primary: bool) -> &'static str {
+        if primary {
+            "{spinner:.blue}"
+        } else {
+            "{spinner:.green}"
+        }
+    }
+
+    /// The basic spinner style
+    pub fn spinner_style(primary: bool) -> ProgressStyle {
+        let template = Self::spinner_element(primary).to_owned() + " {msg}";
+        ProgressStyle::with_template(&template).unwrap()
+    }
+
+    /// The spinner for a download style
+    pub fn spinner_download_style(primary: bool) -> ProgressStyle {
+        let template = Self::spinner_element(primary).to_owned()
+            + " {bytes} downloaded ({bytes_per_sec}) | {msg}";
+        ProgressStyle::with_template(&template).unwrap()
+    }
+
+    /// The basic bar style
+    pub fn bar_style(primary: bool, bytes: bool) -> ProgressStyle {
+        let template = "[{elapsed_precise}]".to_owned()
+            + if primary {
+                " [{bar:30.cyan/blue}]"
+            } else {
+                " [{bar:30.green}]"
+            }
+            + if bytes {
+                " {bytes:>11} / {total_bytes:>11} at {bytes_per_sec:>13}"
+            } else {
+                " {pos}/{len} at {per_sec}"
+            }
+            + " | {msg}";
+        let mut style = ProgressStyle::with_template(&template).unwrap();
+        if !bytes {
+            style = style.with_key(
+                "per_sec",
+                move |state: &ProgressState, w: &mut dyn Write| {
+                    write!(w, "{:.1}/s", state.per_sec()).unwrap();
+                },
+            )
+        }
+        style
     }
 }
 

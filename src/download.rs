@@ -1,6 +1,5 @@
 use std::{
     collections::{BTreeMap, HashMap},
-    fmt::Write,
     path::{Path, PathBuf},
     sync::{
         Arc, OnceLock,
@@ -10,7 +9,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
-use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
+use indicatif::{ProgressBar, ProgressFinish};
 use log::{debug, trace, warn};
 use tokio::{
     fs::{self, File},
@@ -25,6 +24,7 @@ use crate::{
     state::{Downloaded, State, StateAsset, Version},
 };
 
+const BAR_TICK_RATE: Duration = Duration::from_millis(50);
 const TEMP_FILE_EXTENSION: &str = "temp";
 
 /// Util to run `tasks` on `concurrent` workers that call `worker` with `progress, client, bar, task`.
@@ -34,7 +34,7 @@ async fn run_concurrent_with_progress<T, W, WFut, R>(
     progress: Arc<Progress>,
     client: Arc<Client>,
     concurrent: usize,
-    overall_style: ProgressStyle,
+    overall_message: String,
     overall_extra: usize,
     tasks: Vec<T>,
     worker: W,
@@ -53,13 +53,12 @@ where
     let results: Arc<Vec<OnceLock<R>>> =
         Arc::new((0..tasks.len()).map(|_| OnceLock::new()).collect());
 
-    let overall = progress.add(
-        ProgressBar::new((tasks.len() + overall_extra) as u64)
-            .with_style(overall_style)
-            .with_finish(ProgressFinish::AndLeave),
-    );
-    overall.set_position(overall_extra as u64);
-    overall.enable_steady_tick(Duration::from_millis(100));
+    let overall = progress
+        .add_bar(tasks.len() as u64, true, false)
+        .with_message(overall_message)
+        .with_position(overall_extra as u64)
+        .with_finish(ProgressFinish::AndLeave);
+    overall.enable_steady_tick(BAR_TICK_RATE);
 
     for _ in 0..concurrent {
         let progress = progress.clone();
@@ -70,13 +69,8 @@ where
         let results = results.clone();
         let overall = overall.clone();
         let handle = tokio::spawn(async move {
-            let bar = Arc::new(
-                progress
-                    .add(ProgressBar::new_spinner().with_style(
-                        ProgressStyle::with_template("{spinner:.blue} {msg}").unwrap(),
-                    )),
-            );
-            bar.enable_steady_tick(Duration::from_millis(100));
+            let bar = Arc::new(progress.add_spinner(false));
+            bar.enable_steady_tick(BAR_TICK_RATE);
             loop {
                 let i = next.fetch_add(1, Ordering::Relaxed);
                 if i >= tasks.len() {
@@ -85,6 +79,11 @@ where
                 }
 
                 let task = tasks[i].clone();
+
+                // Reset bar
+                bar.set_position(0);
+                bar.set_elapsed(Duration::ZERO);
+
                 let result = worker(progress.clone(), client.clone(), bar.clone(), task).await?;
                 results[i].set(result).unwrap();
                 overall.inc(1);
@@ -194,21 +193,11 @@ async fn get_all_assets(
     }
 
     // Fetch missing assets concurrently
-    let overall_style = ProgressStyle::with_template(
-        "[{elapsed_precise}] [{bar:30.cyan/blue}] {pos}/{len} ({eta}) • Fetching assets at {per_sec}",
-    )
-    .unwrap()
-    .with_key(
-        "per_sec",
-        |state: &indicatif::ProgressState, w: &mut dyn Write| {
-            write!(w, "{:.2}/s", state.per_sec()).unwrap()
-        },
-    );
     let assets = run_concurrent_with_progress(
         progress,
         client,
         options.concurrent,
-        overall_style,
+        "Fetching assets".to_owned(),
         state.ids.len() - to_fetch.len(),
         to_fetch.clone(),
         move |progress, client, spinner, id| async move {
@@ -313,16 +302,6 @@ async fn get_all_versions(
     }
 
     // Fetch missing asset versions concurrently
-    let overall_style = ProgressStyle::with_template(
-        "[{elapsed_precise}] [{bar:30.cyan/blue}] {pos}/{len} ({eta}) • Fetching versions info at {per_sec}",
-    )
-    .unwrap()
-    .with_key(
-        "per_sec",
-        |state: &indicatif::ProgressState, w: &mut dyn Write| {
-            write!(w, "{:.2}/s", state.per_sec()).unwrap()
-        },
-    );
     let tasks = to_fetch
         .iter()
         .map(|id| {
@@ -338,14 +317,14 @@ async fn get_all_versions(
         progress,
         client,
         options.concurrent,
-        overall_style,
+        "Fetching versions info".to_owned(),
         state.assets.len() - to_fetch.len(),
         tasks,
         move |progress, client, spinner, (id, asset_type, asset_display)| async move {
             let versions =
                 get_asset_versions(&client, &spinner, id, &asset_type, &asset_display).await?;
             progress.print(format!(
-                "Got asset version metadata for {asset_display}: {} versions",
+                "Got asset versions info for {asset_display}: {} versions",
                 versions.len()
             ));
             Ok(versions)
@@ -429,22 +408,10 @@ async fn download_asset_version(
     // Use progress bar if length defined, otherwise a spinner
     if let Some(uncompressed_length) = uncompressed_length {
         bar.set_length(uncompressed_length);
-        bar.set_style(
-            ProgressStyle::with_template(
-                "[{elapsed_precise}] [{bar:30.green}] {bytes}/{total_bytes} at {bytes_per_sec} ({eta}) • {msg}",
-            )
-            .unwrap(),
-        )
+        bar.set_style(Progress::bar_style(false, true))
     } else {
-        bar.set_style(
-            ProgressStyle::with_template(
-                "{spinner:.blue} {msg}, {bytes} downloaded ({bytes_per_sec}) • {msg}",
-            )
-            .unwrap(),
-        )
+        bar.set_style(Progress::spinner_download_style(false))
     }
-    bar.set_position(0);
-    bar.set_elapsed(Duration::ZERO);
     bar.set_message(format!("Downloading to `{}`", prefix_path.display()));
 
     // Stream to temp path use BufWriter
@@ -599,21 +566,11 @@ async fn download_all_assets(
         }
     ));
 
-    let overall_style = ProgressStyle::with_template(
-        "[{elapsed_precise}] [{bar:30.cyan/blue}] {pos}/{len} ({eta}) • Downloading {per_sec}",
-    )
-    .unwrap()
-    .with_key(
-        "per_sec",
-        |state: &indicatif::ProgressState, w: &mut dyn Write| {
-            write!(w, "{:.2} ver/s", state.per_sec()).unwrap()
-        },
-    );
     let downloaded_locations = run_concurrent_with_progress(
         progress.clone(),
         client,
         options.concurrent,
-        overall_style,
+        "Downloading versions".to_owned(),
         num_selected - num_to_download,
         to_download,
         move |progress, client, spinner, (id, version, asset_type, file_prefix_path)| async move {
