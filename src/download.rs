@@ -580,7 +580,7 @@ async fn download_all_assets(
     // Check if already done
     let num_to_download = to_download.len();
     if num_to_download == 0 {
-        progress.print(format!(
+        progress.print_primary(format!(
             "All versions already downloaded to `{}`",
             state.output.display()
         ));
