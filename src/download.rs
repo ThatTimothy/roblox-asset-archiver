@@ -168,7 +168,7 @@ async fn get_asset(client: &Client, spinner: &ProgressBar, id: u64) -> Result<St
     };
 
     if let AssetType::Other(asset_type) = &asset.asset_type {
-        warn!("Downloading unknown asset type {asset_type}");
+        warn!("Asset {id} has unknown asset type {asset_type}");
     }
 
     let state_asset = StateAsset {
@@ -262,13 +262,15 @@ async fn get_asset_versions(
                 .find(|place_version| place_version.created_by.is_some())
                 .map(|place_version| place_version.created_by.unwrap());
             if first_creator.is_none() {
-                warn!("No version exists with a defined creator - creator will not be logged");
+                warn!(
+                    "No version exists with a defined creator for {asset_display} - creator will not be logged"
+                );
             }
 
             for place_version in place_versions.iter().rev() {
                 if place_version.created_by.is_none() {
                     warn!(
-                        "Version {} has no defined creator, defaulting to first_creator={}",
+                        "{asset_display} version {} has no defined creator, defaulting to first_creator={}",
                         place_version.version,
                         first_creator
                             .map(|first_creator| first_creator.to_string())
