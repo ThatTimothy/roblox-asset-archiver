@@ -1,5 +1,6 @@
 use std::{fmt::Write, ops::Deref};
 
+use console::style;
 use env_logger::Logger;
 use indicatif::{MultiProgress, ProgressBar, ProgressState, ProgressStyle};
 use indicatif_log_bridge::LogWrapper;
@@ -31,6 +32,12 @@ impl Progress {
         } else {
             self.println(message.as_ref()).expect("Failed to print");
         }
+    }
+
+    /// [Self::print] but in primary color - used for important messages that would otherwise be drowned out
+    pub fn print_primary(&self, message: impl AsRef<str>) {
+        let styled = style(message.as_ref()).for_stderr().blue().bold();
+        self.print(styled.to_string());
     }
 
     /// Adds a basic spinner

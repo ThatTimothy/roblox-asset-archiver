@@ -1332,6 +1332,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "console",
  "env_logger",
  "indicatif",
  "indicatif-log-bridge",

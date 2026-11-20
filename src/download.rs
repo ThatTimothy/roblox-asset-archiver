@@ -224,7 +224,7 @@ async fn get_all_assets(
     )
     .await?;
 
-    progress.print(format!("Fetched all {} assets", state.ids.len()));
+    progress.print_primary(format!("Fetched all {} assets", state.ids.len()));
 
     // Save assets
     for (id, asset) in assets {
@@ -357,7 +357,7 @@ async fn get_all_versions(
     )
     .await?;
 
-    progress.print(format!(
+    progress.print_primary(format!(
         "Fetched all versions info for {} assets",
         state.assets.len()
     ));
@@ -586,26 +586,17 @@ async fn download_all_assets(
     }
 
     // Otherwise, concurrently download all versions
-    progress.print(format!(
-        "Downloading {num_to_download} versions of {} assets to `{}`{}",
+    let num_existing = num_selected - num_to_download;
+    debug!(
+        "Downloading {num_to_download} versions of {} ({num_existing}/{num_selected} existing)",
         state.assets.len(),
-        state.output.display(),
-        if num_selected > num_to_download {
-            format!(
-                ", {}/{num_selected} already downloaded",
-                num_selected - num_to_download
-            )
-        } else {
-            "".to_owned()
-        }
-    ));
-
+    );
     let downloaded_locations = run_concurrent_with_progress(
         progress.clone(),
         client,
         options.concurrent,
         "Downloading versions",
-        num_selected - num_to_download,
+        num_existing,
         to_download,
         move |progress, client, spinner, (id, version, asset_type, file_prefix_path)| async move {
             let file_path = download_asset_version(
@@ -629,7 +620,7 @@ async fn download_all_assets(
     )
     .await?;
 
-    progress.print(format!(
+    progress.print_primary(format!(
         "Downloaded all {num_selected} versions of {} assets to `{}`",
         state.assets.len(),
         state.output.display()
@@ -703,15 +694,15 @@ pub async fn download(
             .join(",")
     };
     if !state.assets.is_empty() {
-        eprintln!(
+        progress.print_primary(format!(
             "Resuming download for {assets_display} to `{}` with references={references}",
             state.output.display()
-        );
+        ));
     } else {
-        eprintln!(
+        progress.print_primary(format!(
             "Preparing download for {assets_display} to `{}` with references={references}",
             state.output.display()
-        );
+        ));
     }
 
     let progress = Arc::new(progress);
