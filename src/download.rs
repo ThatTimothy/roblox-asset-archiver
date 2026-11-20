@@ -14,7 +14,7 @@ use log::{debug, trace, warn};
 use tokio::{
     fs::{self, File},
     io::{AsyncReadExt, AsyncWriteExt, BufWriter},
-    task::JoinHandle,
+    task::JoinSet,
 };
 
 use crate::{
@@ -46,7 +46,7 @@ where
     WFut: Future<Output = Result<R>> + Send + Sync + 'static,
 {
     let concurrent = concurrent.min(tasks.len());
-    let mut handles: Vec<JoinHandle<Result<()>>> = Vec::with_capacity(concurrent);
+    let mut set: JoinSet<Result<()>> = JoinSet::new();
     let next = Arc::new(AtomicUsize::new(0));
     let worker = Arc::new(worker);
     let tasks = Arc::new(tasks);
@@ -68,7 +68,7 @@ where
         let tasks = tasks.clone();
         let results = results.clone();
         let overall = overall.clone();
-        let handle = tokio::spawn(async move {
+        set.spawn(async move {
             let bar = Arc::new(progress.add_spinner(false));
             bar.enable_steady_tick(BAR_TICK_RATE);
             loop {
@@ -92,11 +92,10 @@ where
 
             Ok(())
         });
-        handles.push(handle);
     }
 
-    for handle in handles {
-        handle.await??
+    while let Some(res) = set.join_next().await {
+        res??
     }
 
     let results = Arc::try_unwrap(results)
