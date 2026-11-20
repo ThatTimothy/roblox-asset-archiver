@@ -34,7 +34,7 @@ async fn run_concurrent_with_progress<T, W, WFut, R>(
     progress: Arc<Progress>,
     client: Arc<Client>,
     concurrent: usize,
-    overall_message: String,
+    overall_message: &str,
     overall_extra: usize,
     tasks: Vec<T>,
     worker: W,
@@ -53,9 +53,14 @@ where
     let results: Arc<Vec<OnceLock<R>>> =
         Arc::new((0..tasks.len()).map(|_| OnceLock::new()).collect());
 
+    trace!(
+        "Starting \"{overall_message}\" with {concurrent} workers for {} tasks",
+        tasks.len()
+    );
+
     let overall = progress
         .add_bar(tasks.len() as u64, true, false)
-        .with_message(overall_message)
+        .with_message(overall_message.to_owned())
         .with_position(overall_extra as u64)
         .with_finish(ProgressFinish::AndLeave);
     overall.enable_steady_tick(BAR_TICK_RATE);
@@ -97,6 +102,11 @@ where
     while let Some(res) = set.join_next().await {
         res??
     }
+
+    trace!(
+        "Finished \"{overall_message}\" with {concurrent} workers for {} tasks",
+        tasks.len()
+    );
 
     let results = Arc::try_unwrap(results)
         .unwrap()
@@ -185,6 +195,7 @@ async fn get_all_assets(
         .filter(|id| !state.assets.contains_key(id))
         .copied()
         .collect::<Vec<_>>();
+    trace!("Assets to fetch: {to_fetch:?}");
 
     // If nothing to fetch, no work to be done
     if to_fetch.len() == 0 {
@@ -192,24 +203,32 @@ async fn get_all_assets(
     }
 
     // Fetch missing assets concurrently
+    let num_existing = state.ids.len() - to_fetch.len();
+    debug!(
+        "Fetching {} assets ({num_existing}/{} existing)",
+        to_fetch.len(),
+        state.ids.len()
+    );
     let assets = run_concurrent_with_progress(
-        progress,
+        progress.clone(),
         client,
         options.concurrent,
-        "Fetching assets".to_owned(),
-        state.ids.len() - to_fetch.len(),
-        to_fetch.clone(),
+        "Fetching assets",
+        num_existing,
+        to_fetch,
         move |progress, client, spinner, id| async move {
             let state_asset = get_asset(&client, &spinner, id).await?;
-            progress.print(format!("Found {state_asset:#}"));
-            Ok(state_asset)
+            progress.print(format!("Fetched {state_asset:#}"));
+            Ok((id, state_asset))
         },
     )
     .await?;
 
+    progress.print(format!("Fetched all {} assets", state.ids.len()));
+
     // Save assets
-    for (id, asset) in to_fetch.iter().zip(assets) {
-        state.assets.insert(*id, asset);
+    for (id, asset) in assets {
+        state.assets.insert(id, asset);
     }
     state.save().context("Failed to save state")?;
 
@@ -294,6 +313,7 @@ async fn get_all_versions(
         .iter()
         .filter_map(|(id, asset)| asset.versions.is_none().then_some(*id))
         .collect::<Vec<_>>();
+    trace!("Asset versions info to fetch: {to_fetch:?}");
 
     // If nothing to fetch, no work to be done
     if to_fetch.len() == 0 {
@@ -312,12 +332,18 @@ async fn get_all_versions(
             )
         })
         .collect();
+    let num_existing = state.assets.len() - to_fetch.len();
+    debug!(
+        "Fetching versions info for {} assets ({num_existing}/{} existing)",
+        to_fetch.len(),
+        state.assets.len()
+    );
     let versions = run_concurrent_with_progress(
-        progress,
+        progress.clone(),
         client,
         options.concurrent,
-        "Fetching versions info".to_owned(),
-        state.assets.len() - to_fetch.len(),
+        "Fetching versions info",
+        num_existing,
         tasks,
         move |progress, client, spinner, (id, asset_type, asset_display)| async move {
             let versions =
@@ -330,6 +356,11 @@ async fn get_all_versions(
         },
     )
     .await?;
+
+    progress.print(format!(
+        "Fetched all versions info for {} assets",
+        state.assets.len()
+    ));
 
     // Save assets
     for (id, versions) in to_fetch.iter().zip(versions) {
@@ -467,6 +498,7 @@ async fn remove_temp_and_get_existing(dir: &Path) -> Result<HashMap<String, Stri
                 fs::remove_file(entry.path()).await.with_context(|| {
                     format!("Failed to remove temp file {}", entry.path().display())
                 })?;
+                debug!("Removed temp file {}", entry.path().display())
             } else if let Some(file_name) = path.file_name()
                 && let Some(file_name) = file_name.to_str()
                 && let Some(file_prefix) = path.file_prefix()
@@ -546,7 +578,10 @@ async fn download_all_assets(
     // Check if already done
     let num_to_download = to_download.len();
     if num_to_download == 0 {
-        progress.print("All versions already downloaded");
+        progress.print(format!(
+            "All versions already downloaded to `{}`",
+            state.output.display()
+        ));
         return Ok(());
     }
 
@@ -569,7 +604,7 @@ async fn download_all_assets(
         progress.clone(),
         client,
         options.concurrent,
-        "Downloading versions".to_owned(),
+        "Downloading versions",
         num_selected - num_to_download,
         to_download,
         move |progress, client, spinner, (id, version, asset_type, file_prefix_path)| async move {
@@ -595,7 +630,7 @@ async fn download_all_assets(
     .await?;
 
     progress.print(format!(
-        "Downloaded {num_selected} versions of {} assets to `{}`",
+        "Downloaded all {num_selected} versions of {} assets to `{}`",
         state.assets.len(),
         state.output.display()
     ));
@@ -657,16 +692,26 @@ pub async fn download(
     }
 
     // Output resuming or preparing based on existing asset information
-    if !state.assets.is_empty() {
-        // eprintln!(
-        //     "Resuming download for {state_asset:#} to `{}` with references={references}",
-        //     state.output.display()
-        // );
+    let assets_display = if state.ids.len() > 5 {
+        format!("{} assets", state.ids.len())
     } else {
-        // eprintln!(
-        //     "Preparing download for {id} to `{}` with references={references}",
-        //     state.output.display()
-        // );
+        state
+            .ids
+            .iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    if !state.assets.is_empty() {
+        eprintln!(
+            "Resuming download for {assets_display} to `{}` with references={references}",
+            state.output.display()
+        );
+    } else {
+        eprintln!(
+            "Preparing download for {assets_display} to `{}` with references={references}",
+            state.output.display()
+        );
     }
 
     let progress = Arc::new(progress);
