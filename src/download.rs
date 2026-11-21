@@ -575,6 +575,12 @@ async fn download_all_assets(
     let mut num_selected = 0;
     for (id, state_asset) in &mut state.assets {
         let state_versions = state_asset.versions.as_ref().unwrap();
+        let num_versions = state_versions.len();
+
+        // An unpublished place has no versions
+        if num_versions == 0 {
+            continue;
+        }
 
         let downloaded_path =
             PathBuf::from(format!("{}", state_asset.asset.asset_type)).join(format!("{id}"));
@@ -591,7 +597,6 @@ async fn download_all_assets(
         let downloaded = state_asset.downloaded.as_mut().unwrap();
         let existing = remove_temp_and_get_existing(&output_path).await?;
 
-        let num_versions = state_versions.len();
         let version_padding = num_versions.to_string().len();
 
         let mut min = 1usize;
