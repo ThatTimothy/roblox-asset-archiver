@@ -355,6 +355,11 @@ pub struct Asset {
     pub state: String,
     pub social_link: Option<Vec<AssetSocialLink>>,
 }
+impl Asset {
+    pub fn revision_id(&self) -> u64 {
+        self.revision_id.parse().expect("Malformed revision id")
+    }
+}
 
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -722,8 +727,12 @@ impl Client {
         self.get("place".to_owned(), url).await
     }
 
-    /// Gets a page of versions of an place
-    async fn place_versions_page(
+    /// Gets a page of versions of an place, with notes and contributor information
+    ///
+    /// Requires universe.place:read ON EVERYTHING (see https://devforum.roblox.com/t/getplaceversionhistory-endpoint-should-not-require-scope-to-all-resources/4976529 for feature request)
+    ///
+    /// Docs: https://create.roblox.com/docs/en-us/cloud/reference/domains/apis#PlaceVersion_GetPlaceVersionHistory
+    pub async fn place_versions_page(
         &self,
         place_id: u64,
         next_cursor: Option<String>,
@@ -740,37 +749,6 @@ impl Client {
             }
         }
         self.get("place_versions_page".to_owned(), url).await
-    }
-
-    /// Gets all versions of a place, with notes and contributor information
-    ///
-    /// Requires universe.place:read ON EVERYTHING (see https://devforum.roblox.com/t/getplaceversionhistory-endpoint-should-not-require-scope-to-all-resources/4976529 for feature request)
-    ///
-    /// Docs: https://create.roblox.com/docs/en-us/cloud/reference/domains/apis#PlaceVersion_GetPlaceVersionHistory
-    pub async fn place_versions(&self, place_id: u64) -> Result<Vec<PlaceVersion>> {
-        let mut results = Vec::new();
-
-        let mut next_cursor = None;
-        loop {
-            let result = self.place_versions_page(place_id, next_cursor).await?;
-            trace!(
-                "Got page with {} results, nextCursor: {}",
-                result.place_versions.len(),
-                result.next_cursor.clone().unwrap_or("None".to_owned())
-            );
-
-            for place_version in result.place_versions {
-                results.push(place_version);
-            }
-
-            next_cursor = result.next_cursor.clone();
-
-            if !result.has_more {
-                break;
-            }
-        }
-
-        Ok(results)
     }
 
     /// Gets details for a asset
@@ -804,7 +782,11 @@ impl Client {
     }
 
     /// Gets a page of versions of an asset
-    async fn asset_versions_page(
+    ///
+    /// Requires asset:read
+    ///
+    /// Docs: https://create.roblox.com/docs/cloud/reference/features/assets#Assets_ListAssetVersions
+    pub async fn asset_versions_page(
         &self,
         asset_id: u64,
         next_page_token: Option<String>,
@@ -819,38 +801,5 @@ impl Client {
             }
         }
         self.get("asset_versions_page".to_owned(), url).await
-    }
-
-    /// Gets all versions of an asset
-    ///
-    /// Requires asset:read
-    ///
-    /// Docs: https://create.roblox.com/docs/cloud/reference/features/assets#Assets_ListAssetVersions
-    ///
-    /// Note: inconsistent with docs, see https://devforum.roblox.com/t/listassetversions-example-is-completely-wrong/4976456
-    pub async fn asset_versions(&self, asset_id: u64) -> Result<Vec<AssetVersion>> {
-        let mut results = Vec::new();
-
-        let mut next_page_token = None;
-        loop {
-            let result = self.asset_versions_page(asset_id, next_page_token).await?;
-            trace!(
-                "Got page with {} results, nextPageToken: {}",
-                result.asset_versions.len(),
-                result.next_page_token.clone().unwrap_or("None".to_owned())
-            );
-
-            for asset_version in result.asset_versions {
-                results.push(asset_version);
-            }
-
-            next_page_token = result.next_page_token.clone();
-
-            if next_page_token == None {
-                break;
-            }
-        }
-
-        Ok(results)
     }
 }

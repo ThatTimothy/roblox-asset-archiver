@@ -238,20 +238,43 @@ async fn get_all_assets(
 /// Gets the versions for a specific asset
 async fn get_asset_versions(
     client: &Client,
-    spinner: &ProgressBar,
+    bar: &ProgressBar,
     id: u64,
     asset_type: &AssetType,
+    latest_version: u64,
     asset_display: &str,
 ) -> Result<BTreeMap<u64, Version>> {
+    // Prepare bar
+    bar.set_length(latest_version);
+    bar.set_style(Progress::bar_style(false, false));
+
     // Get versions
     let versions = match asset_type {
         AssetType::Place => {
             // Place versions have a special endpoint that includes publish notes
-            message!(spinner, "Fetching place versions info for {asset_display}");
-            let place_versions = client
-                .place_versions(id)
-                .await
-                .context("Failed to fetch place versions info")?;
+            message!(bar, "Fetching place versions info for {asset_display}");
+
+            let mut place_versions = Vec::with_capacity(latest_version as usize);
+            let mut next_cursor = None;
+            loop {
+                let page = client
+                    .place_versions_page(id, next_cursor)
+                    .await
+                    .context("Failed to fetch place versions info")?;
+                trace!(
+                    "Got place versions page with {} results, nextCursor: {}",
+                    page.place_versions.len(),
+                    page.next_cursor.clone().unwrap_or("None".to_owned())
+                );
+
+                bar.inc(page.place_versions.len() as u64);
+                place_versions.extend(page.place_versions);
+                next_cursor = page.next_cursor.clone();
+
+                if !page.has_more {
+                    break;
+                }
+            }
 
             // Version does not always have creator - this seems to happen with version 1 specifically but generalized here
             // If the version does not have a creator, the safe default is the first creator in all versions
@@ -287,11 +310,29 @@ async fn get_asset_versions(
         }
         _ => {
             // Every other type uses standard asset versions
-            message!(spinner, "Fetching asset versions info for {asset_display}");
-            let asset_versions = client
-                .asset_versions(id)
-                .await
-                .context("Failed to fetch asset versions info")?;
+            message!(bar, "Fetching asset versions info for {asset_display}");
+
+            let mut asset_versions = Vec::with_capacity(latest_version as usize);
+            let mut next_page_token = None;
+            loop {
+                let page = client
+                    .asset_versions_page(id, next_page_token)
+                    .await
+                    .context("Failed to fetch asset versions info")?;
+                trace!(
+                    "Got versions page with {} results, nextPageToken: {}",
+                    page.asset_versions.len(),
+                    page.next_page_token.clone().unwrap_or("None".to_owned())
+                );
+
+                bar.inc(page.asset_versions.len() as u64);
+                asset_versions.extend(page.asset_versions);
+                next_page_token = page.next_page_token.clone();
+
+                if next_page_token == None {
+                    break;
+                }
+            }
 
             asset_versions
                 .into_iter()
@@ -330,6 +371,7 @@ async fn get_all_versions(
             (
                 *id,
                 state_asset.asset.asset_type.clone(),
+                state_asset.asset.revision_id(),
                 format!("{state_asset}"),
             )
         })
@@ -347,9 +389,16 @@ async fn get_all_versions(
         "Fetching versions info",
         num_existing,
         tasks,
-        move |progress, client, spinner, (id, asset_type, asset_display)| async move {
-            let versions =
-                get_asset_versions(&client, &spinner, id, &asset_type, &asset_display).await?;
+        move |progress, client, bar, (id, asset_type, latest_version, asset_display)| async move {
+            let versions = get_asset_versions(
+                &client,
+                &bar,
+                id,
+                &asset_type,
+                latest_version,
+                &asset_display,
+            )
+            .await?;
             progress.print(format!(
                 "Got asset versions info for {asset_display}: {} versions",
                 versions.len()
