@@ -8,9 +8,10 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow};
 use indicatif::{ProgressBar, ProgressFinish};
 use log::{debug, trace, warn};
+use strum::IntoEnumIterator;
 use tokio::{
     fs::{self, File},
     io::{AsyncReadExt, AsyncWriteExt, BufWriter},
@@ -21,7 +22,7 @@ use crate::{
     api::{AssetType, Client},
     cli::DownloadOptions,
     progress::{Progress, message},
-    state::{Downloaded, State, StateAsset, Version},
+    state::{Downloaded, Source, State, StateAsset, Version},
 };
 
 const BAR_TICK_RATE: Duration = Duration::from_millis(50);
@@ -114,6 +115,86 @@ where
         .map(|result| result.into_inner().unwrap())
         .collect();
     Ok(results)
+}
+
+/// Discovers asset ids of a certain type
+async fn discover_asset_ids_of_type(
+    client: &Client,
+    spinner: &ProgressBar,
+    asset_type: &AssetType,
+) -> Result<Vec<u64>> {
+    // Discover assets
+    // Place versions have a special endpoint that includes publish notes
+    message!(spinner, "Discovering asset ids for {asset_type}");
+
+    let mut assets = Vec::new();
+    let mut next_page_cursor = None;
+    loop {
+        let page = client
+            .get_assets_page(asset_type, None, next_page_cursor)
+            .await
+            .context("Failed to get asset ids page")?;
+        trace!(
+            "Got assets page with {} results, nextCursor: {}",
+            page.data.len(),
+            page.next_page_cursor.clone().unwrap_or("None".to_owned())
+        );
+
+        assets.extend(page.data.iter().map(|asset| asset.asset_id));
+        next_page_cursor = page.next_page_cursor.clone();
+        spinner.set_message(format!(
+            "Discovering asset ids for {asset_type} | {} fetched",
+            assets.len()
+        ));
+
+        if next_page_cursor.is_none() {
+            break;
+        }
+    }
+
+    Ok(assets)
+}
+
+/// Gets all the assets that are not yet fetched
+async fn discover_all_asset_ids(
+    progress: Arc<Progress>,
+    client: Arc<Client>,
+    state: &mut State,
+) -> Result<()> {
+    // If ids already fetched, no work to be done
+    if !state.ids.is_empty() {
+        return Ok(());
+    }
+
+    // Have to fetch each type separately
+    let to_fetch: Vec<AssetType> = AssetType::iter()
+        .filter(|asset_type| asset_type != &AssetType::Other(String::new()))
+        .collect();
+    debug!("Discovering asset ids for {} types", to_fetch.len());
+
+    // Ideally we've use concurrency here, but the endpoint is 1/s ratelimit so we adding concurrency just creates a thundering herd problem
+    let spinner = progress.add_spinner(true);
+    spinner.enable_steady_tick(BAR_TICK_RATE);
+    let mut all_ids = Vec::new();
+    for asset_type in to_fetch {
+        let ids = discover_asset_ids_of_type(&client, &spinner, &asset_type).await?;
+        if ids.len() > 0 {
+            progress.print(format!(
+                "Discovered {} asset ids for {}",
+                ids.len(),
+                asset_type
+            ));
+        }
+        all_ids.extend(ids);
+    }
+
+    progress.print_primary(format!("Discovered {} asset ids", all_ids.len()));
+
+    // Save ids
+    state.ids = all_ids;
+    state.save().context("Failed to save state")?;
+
+    Ok(())
 }
 
 /// Gets a single asset
@@ -627,6 +708,7 @@ async fn download_all_assets(
             }
         }
 
+        trace!("{min} {max} {id}");
         num_selected += max - min + 1;
     }
     trace!("To download: {:?}", to_download);
@@ -708,38 +790,17 @@ pub async fn download(
     mut state: State,
     options: DownloadOptions,
 ) -> Result<()> {
-    let introspect = client
-        .introspect()
-        .await
-        .context("Failed to validate API key")?;
-
-    if !introspect.enabled {
-        bail!("API key \"{}\" is not enabled", introspect.name);
-    }
-    if introspect.expired {
-        bail!("API key \"{}\" is expired", introspect.name);
-    }
-
-    debug!(
-        "API key \"{}\" owned by {} validated, scopes: {}",
-        introspect.name,
-        introspect.authorized_user_id,
-        introspect
-            .scopes
-            .iter()
-            .map(|scope| scope.to_string())
-            .collect::<Vec<_>>()
-            .join(", "),
-    );
-
     let State { references, .. } = state;
 
     if references {
         todo!()
     }
 
+    let progress = Arc::new(progress);
+    let client = Arc::new(client);
+
     // Output resuming or preparing based on existing asset information
-    let assets_display = if state.ids.len() > 5 {
+    let mut assets_display = if state.ids.len() > 5 {
         format!("{} assets", state.ids.len())
     } else {
         state
@@ -749,20 +810,31 @@ pub async fn download(
             .collect::<Vec<_>>()
             .join(",")
     };
-    if !state.assets.is_empty() {
+    if !state.fresh {
         progress.print_primary(format!(
             "Resuming download for {assets_display} to `{}` with references={references}",
             state.output.display()
         ));
     } else {
+        match state.source {
+            Source::User(user_id) => {
+                assets_display = format!("user {user_id}");
+            }
+            _ => {}
+        }
         progress.print_primary(format!(
             "Preparing download for {assets_display} to `{}` with references={references}",
             state.output.display()
         ));
     }
 
-    let progress = Arc::new(progress);
-    let client = Arc::new(client);
+    match state.source {
+        Source::User(_) => {
+            // User requires an additional stage: fetch all asset ids for user
+            discover_all_asset_ids(progress.clone(), client.clone(), &mut state).await?;
+        }
+        Source::Ids => {}
+    }
 
     get_all_assets(progress.clone(), client.clone(), &mut state, &options).await?;
     get_all_versions(progress.clone(), client.clone(), &mut state, &options).await?;

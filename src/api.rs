@@ -7,11 +7,12 @@ use std::{
 use log::{trace, warn};
 use reqwest::{IntoUrl, Method, Request, Response, StatusCode, Url, header::HeaderMap};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use strum::EnumString;
+use strum::{EnumIter, EnumString};
 use tokio::{sync::Mutex, time::sleep};
 
 const API_BASE: &'static str = "https://apis.roblox.com";
-const API_HOST: &'static str = "apis.roblox.com";
+const ITEMCONFIGURATION_BASE: &'static str = "https://itemconfiguration.roblox.com";
+const API_HOSTS: [&'static str; 2] = ["apis.roblox.com", "itemconfiguration.roblox.com"];
 
 #[derive(Deserialize, Debug)]
 pub struct APICodeMessageError {
@@ -212,7 +213,7 @@ pub struct PlaceVersionsResponse {
 /// Represents an AssetType
 ///
 /// Ref: https://create.roblox.com/docs/reference/engine/enums/AssetType
-#[derive(Serialize, Deserialize, strum::Display, EnumString, PartialEq, Clone, Debug)]
+#[derive(Serialize, Deserialize, strum::Display, EnumString, EnumIter, PartialEq, Clone, Debug)]
 #[serde(rename_all = "PascalCase")]
 #[strum(serialize_all = "PascalCase")]
 pub enum AssetType {
@@ -425,6 +426,21 @@ pub struct AssetVersionsResponse {
     pub next_page_token: Option<String>,
 }
 
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct AssetMinimal {
+    pub asset_id: u64,
+    // pub name: String,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct AssetsPageResponse {
+    // pub prev_page_cursor: Option<String>,
+    pub next_page_cursor: Option<String>,
+    pub data: Vec<AssetMinimal>,
+}
+
 pub struct Client {
     http: reqwest::Client,
     api_key: String,
@@ -463,7 +479,9 @@ impl Client {
         };
 
         // API specific handling
-        if request.url().host_str() == Some(API_HOST) {
+        if let Some(host) = request.url().host_str()
+            && API_HOSTS.contains(&host)
+        {
             request
                 .headers_mut()
                 .insert("X-API-KEY", self.api_key.parse().unwrap());
@@ -803,5 +821,28 @@ impl Client {
             }
         }
         self.get("asset_versions_page".to_owned(), url).await
+    }
+
+    /// Gets a page of assets of a certain type for a user or group
+    pub async fn get_assets_page(
+        &self,
+        asset_type: &AssetType,
+        group_id: Option<u64>,
+        cursor: Option<String>,
+    ) -> Result<AssetsPageResponse> {
+        let mut url =
+            Url::parse(&format!("{ITEMCONFIGURATION_BASE}/v1/creations/get-assets")).unwrap();
+        {
+            let mut query = url.query_pairs_mut();
+            query.append_pair("AssetType", &asset_type.to_string());
+            query.append_pair("limit", "100");
+            if let Some(group_id) = group_id {
+                query.append_pair("groupId", &group_id.to_string());
+            }
+            if let Some(cursor) = cursor {
+                query.append_pair("cursor", &cursor);
+            }
+        }
+        self.get("get_assets_page".to_owned(), url).await
     }
 }

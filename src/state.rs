@@ -11,6 +11,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::{Asset, AssetVersion, Place, PlaceVersion, Universe};
 
+#[derive(Serialize, Deserialize, PartialEq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub enum Source {
+    Ids,
+    User(u64),
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum Version {
@@ -63,25 +70,31 @@ impl Display for StateAsset {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct State {
     schema_version: String,
+    pub source: Source,
     pub ids: Vec<u64>,
     pub references: bool,
     pub assets: HashMap<u64, StateAsset>,
 
     #[serde(skip)]
     pub output: PathBuf,
+
+    #[serde(skip)]
+    pub fresh: bool,
 }
 
 impl State {
     pub const STATE_FILENAME: &str = concat!(env!("CARGO_PKG_NAME"), ".json");
     pub const STATE_SCHEMA_VERSION: &str = concat!(env!("CARGO_PKG_NAME"), ":", "1");
 
-    pub fn new(ids: Vec<u64>, references: bool, output: PathBuf) -> Self {
+    pub fn new(source: Source, ids: Vec<u64>, references: bool, output: PathBuf) -> Self {
         Self {
             schema_version: Self::STATE_SCHEMA_VERSION.to_owned(),
+            source,
             ids,
             references,
             assets: HashMap::new(),
             output,
+            fresh: true,
         }
     }
 
@@ -106,6 +119,7 @@ impl State {
         }
 
         state.output = output.into();
+        state.fresh = false;
 
         Ok(Some(state))
     }

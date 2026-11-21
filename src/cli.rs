@@ -1,10 +1,18 @@
-use std::{num::NonZeroUsize, path::PathBuf};
+use std::{
+    num::NonZeroUsize,
+    path::{Path, PathBuf},
+};
 
-use anyhow::{Context, Error, bail};
+use anyhow::{Context, Error, Result, bail};
 use clap::{ArgAction, Args, Parser, Subcommand};
-use log::LevelFilter;
+use log::{LevelFilter, debug};
 
-use crate::{api::Client, download::download, progress::Progress, state::State};
+use crate::{
+    api::{Client, IntrospectResponse},
+    download::download,
+    progress::Progress,
+    state::{Source, State},
+};
 
 /// A simple CLI tool to back up and archive every asset (games, places, models, images, passes, etc) on Roblox into a Rojo-compatible Git repository
 #[derive(Parser, Debug)]
@@ -48,7 +56,7 @@ pub struct DownloadOptions {
 
 #[derive(Subcommand, Debug)]
 enum DownloadCommand {
-    /// Downloads versions of an asset
+    /// Downloads versions of asset(s)
     ///
     /// Supports: Place, Model, Plugin, Audio, Decal, Image, Video, Mesh, MeshPart, Animation, all clothing items, all animation avatar items
     Asset {
@@ -56,6 +64,22 @@ enum DownloadCommand {
         #[arg(required = true, value_delimiter = ',')]
         ids: Vec<u64>,
 
+        /// The directory to output downloads
+        #[arg(short, long, default_value = "output")]
+        output: PathBuf,
+
+        /// Also download asset's references (Images, Meshes, MeshParts, Audios, Videos, Animations within it)
+        #[arg(short, long)]
+        references: bool,
+
+        #[command(flatten)]
+        options: DownloadOptions,
+    },
+
+    /// Downloads versions of all assets under the API key's user
+    ///
+    /// Supports: Place, Model, Plugin, Audio, Decal, Image, Video, Mesh, MeshPart, Animation, all clothing items, all animation avatar items
+    User {
         /// The directory to output downloads
         #[arg(short, long, default_value = "output")]
         output: PathBuf,
@@ -79,6 +103,65 @@ enum DownloadCommand {
     },
 }
 
+async fn validate_key(client: &Client) -> Result<IntrospectResponse> {
+    let introspect = client
+        .introspect()
+        .await
+        .context("Failed to validate API key")?;
+
+    if !introspect.enabled {
+        bail!("API key \"{}\" is not enabled", introspect.name);
+    }
+    if introspect.expired {
+        bail!("API key \"{}\" is expired", introspect.name);
+    }
+
+    debug!(
+        "API key \"{}\" owned by {} validated, scopes: {}",
+        introspect.name,
+        introspect.authorized_user_id,
+        introspect
+            .scopes
+            .iter()
+            .map(|scope| scope.to_string())
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+
+    Ok(introspect)
+}
+
+fn scan_for_existing() -> Result<PathBuf> {
+    // Scan cwd
+    let mut possible = Vec::new();
+    let scan = PathBuf::from(".");
+    for entry in scan.read_dir().context("Failed to scan directory")? {
+        if let Ok(entry) = entry
+            && let Ok(metadata) = entry.metadata()
+            && metadata.is_dir()
+            && let path = entry.path()
+            && path.join(State::STATE_FILENAME).exists()
+        {
+            possible.push(path);
+        }
+    }
+
+    match possible.len() {
+        0 => bail!(
+            "Scanned current directory and found resumption targets - try passing [output] directly"
+        ),
+        1 => Ok(possible.remove(0)),
+        _ => bail!(
+            "Scanned current directory and found multiple resumption targets: {} - pass [output] to select one",
+            possible
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
 pub(crate) async fn run() -> Result<(), Error> {
     let args = CliArgs::parse();
     let logger = env_logger::builder()
@@ -96,88 +179,104 @@ pub(crate) async fn run() -> Result<(), Error> {
     let progress = Progress::new(logger);
 
     let client = Client::new(args.api_key);
+    let introspect = validate_key(&client).await?;
 
     match args.command {
         Command::Download(command) => {
-            // Determine output location
-            let output = match &command {
-                DownloadCommand::Resume { output, .. } => {
-                    // Output path is optional for resume
-                    match output {
-                        Some(output) => output.clone(),
-                        None => {
-                            // If not passed, scan cwd
-                            let mut possible = Vec::new();
-                            let scan = PathBuf::from(".");
-                            for entry in scan.read_dir().context("Failed to scan directory")? {
-                                if let Ok(entry) = entry
-                                    && let Ok(metadata) = entry.metadata()
-                                    && metadata.is_dir()
-                                    && let path = entry.path()
-                                    && path.join(State::STATE_FILENAME).exists()
-                                {
-                                    possible.push(path);
-                                }
-                            }
+            let existing_conflicting_state_error = |output: &Path| -> Result<()> {
+                bail!(
+                    "Existing state file found in `{}` - did you mean to do `{} download resume` OR set `--output`?",
+                    output.display(),
+                    env!("CARGO_BIN_NAME")
+                );
+            };
+            let check_empty_output = |output: &Path| {
+                if output.exists() && !output.is_empty() {
+                    bail!(
+                        "Cannot download to non-empty directory `{}`",
+                        output.display()
+                    );
+                }
 
-                            match possible.len() {
-                                0 => bail!(
-                                    "Scanned current directory and found resumption targets - try passing [output] directly"
-                                ),
-                                1 => possible.remove(0),
-                                _ => bail!(
-                                    "Scanned current directory and found multiple resumption targets: {} - pass [output] to select one",
-                                    possible
-                                        .iter()
-                                        .map(|p| p.display().to_string())
-                                        .collect::<Vec<_>>()
-                                        .join(", ")
-                                ),
-                            }
+                Ok(())
+            };
+
+            match command {
+                DownloadCommand::Resume { output, options } => {
+                    // Resume scans cwd if output is not provided
+                    let output = match output {
+                        None => scan_for_existing()?,
+                        Some(output) => output,
+                    };
+                    match State::load(&output)? {
+                        None => {
+                            // Unlike other commands, resume only works with a state file
+                            bail!(
+                                "Cannot resume - {} does not have state file `{}`",
+                                output.display(),
+                                State::STATE_FILENAME
+                            );
+                        }
+                        Some(existing_state) => {
+                            download(progress, client, existing_state, options).await
                         }
                     }
                 }
-                DownloadCommand::Asset { output, .. } => output.clone(),
-            };
-            let existing_state = State::load(&output).context("Failed to load state")?;
-
-            match command {
-                DownloadCommand::Resume { options, .. } => match existing_state {
-                    None => {
-                        bail!(
-                            "Cannot resume - state file `{}` not found",
-                            State::STATE_FILENAME
-                        );
-                    }
-                    Some(state) => download(progress, client, state, options).await,
-                },
                 DownloadCommand::Asset {
                     ids,
+                    output,
                     references,
                     options,
-                    ..
                 } => {
+                    let existing_state = State::load(&output)?;
                     if let Some(existing_state) = existing_state {
-                        if existing_state.ids == ids && existing_state.references == references {
+                        // Resume if existing state matches the command run, otherwise it conflicts
+                        if existing_state.source == Source::Ids
+                            && existing_state.ids == ids
+                            && existing_state.references == references
+                        {
                             return download(progress, client, existing_state, options).await;
                         }
-                        bail!(
-                            "Existing state file found - did you mean to do `{} download resume`?",
-                            env!("CARGO_BIN_NAME")
-                        )
+                        existing_conflicting_state_error(&output)?;
                     }
 
-                    if output.exists() && !output.is_empty() {
-                        bail!(
-                            "Cannot download to non-empty directory `{}`",
-                            output.display()
-                        );
-                    }
+                    check_empty_output(&output)?;
 
                     download(
                         progress,
                         client,
-                        State::new(ids, references, output),
+                        State::new(Source::Ids, ids, references, output),
+                        options,
+                    )
+                    .await
+                }
+                DownloadCommand::User {
+                    output,
+                    references,
+                    options,
+                } => {
+                    let existing_state = State::load(&output)?;
+                    if let Some(existing_state) = existing_state {
+                        // Resume if existing state matches the command run, otherwise it conflicts
+                        if existing_state.source == Source::User(introspect.authorized_user_id)
+                            && existing_state.references == references
+                        {
+                            return download(progress, client, existing_state, options).await;
+                        }
+                        existing_conflicting_state_error(&output)?;
+                    }
+
+                    check_empty_output(&output)?;
+
+                    download(
+                        progress,
+                        client,
+                        State::new(
+                            Source::User(introspect.authorized_user_id),
+                            Vec::new(),
+                            references,
+                            output,
+                        ),
                         options,
                     )
                     .await
