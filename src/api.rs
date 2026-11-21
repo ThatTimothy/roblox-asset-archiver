@@ -257,8 +257,8 @@ pub enum AssetType {
     FrontAccessory,
     BackAccessory,
     WaistAccessory,
-    EarAccessory,
-    EyeAccessory,
+    // EarAccessory, - documented at ref above but never used, itemconfiguration treats as invalid (from my own research both of these were added but assets were never migrated over - maybe backwards compat issue?)
+    // EyeAccessory, - same update and issue as EarAccessory
 
     /* Animation avatar items */
     /// Animation package - not to be confused with a Model package
