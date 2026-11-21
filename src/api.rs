@@ -493,10 +493,12 @@ impl Client {
 
             // If need to retry after, wait then reset remaining to 1 (we will get the right value from header)
             if let Some(retry_after) = retry_after {
-                warn!(
-                    "Out of requests on {redacted_url}, retrying in {:.2}s to avoid ratelimit",
-                    retry_after.as_secs_f64()
-                );
+                if retry_after.as_secs() > 1 {
+                    warn!(
+                        "Out of requests on {redacted_url}, retrying in {:.2}s to avoid ratelimit",
+                        retry_after.as_secs_f64()
+                    );
+                }
                 sleep(retry_after).await;
 
                 let mut ratelimits = self.ratelimits.lock().await;
