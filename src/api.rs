@@ -181,6 +181,34 @@ pub struct Place {
     pub server_size: u64,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaceVersion {
+    pub version: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub contributors: Vec<u64>,
+    pub save_type: i64,
+    pub is_published: bool,
+    pub publish_status: i64,
+    pub has_notes: bool,
+    pub created_time: String,
+    pub created_by: Option<u64>,
+}
+impl PlaceVersion {
+    pub fn version(&self) -> u64 {
+        self.version.parse().expect("Malformed version")
+    }
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaceVersionsResponse {
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
+    pub place_versions: Vec<PlaceVersion>,
+}
+
 /// Represents an AssetType
 ///
 /// Ref: https://create.roblox.com/docs/reference/engine/enums/AssetType
@@ -326,34 +354,6 @@ pub struct Asset {
     pub previews: Option<Vec<AssetPreview>>,
     pub state: String,
     pub social_link: Option<Vec<AssetSocialLink>>,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct PlaceVersion {
-    pub version: String,
-    pub title: Option<String>,
-    pub description: Option<String>,
-    pub contributors: Vec<u64>,
-    pub save_type: i64,
-    pub is_published: bool,
-    pub publish_status: i64,
-    pub has_notes: bool,
-    pub created_time: String,
-    pub created_by: Option<u64>,
-}
-impl PlaceVersion {
-    pub fn version(&self) -> u64 {
-        self.version.parse().expect("Malformed version")
-    }
-}
-
-#[derive(Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct PlaceVersionsResponse {
-    pub next_cursor: Option<String>,
-    pub has_more: bool,
-    pub place_versions: Vec<PlaceVersion>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -722,19 +722,6 @@ impl Client {
         self.get("place".to_owned(), url).await
     }
 
-    /// Gets details for a asset
-    ///
-    /// Requires asset:read
-    ///
-    /// Docs: https://create.roblox.com/docs/en-us/cloud/reference/features/assets#Assets_GetAsset
-    pub async fn asset(&self, asset_id: u64) -> Result<Asset> {
-        self.get(
-            "asset".to_owned(),
-            format!("{API_BASE}/assets/v1/assets/{asset_id}"),
-        )
-        .await
-    }
-
     /// Gets a page of versions of an place
     async fn place_versions_page(
         &self,
@@ -784,6 +771,19 @@ impl Client {
         }
 
         Ok(results)
+    }
+
+    /// Gets details for a asset
+    ///
+    /// Requires asset:read
+    ///
+    /// Docs: https://create.roblox.com/docs/en-us/cloud/reference/features/assets#Assets_GetAsset
+    pub async fn asset(&self, asset_id: u64) -> Result<Asset> {
+        self.get(
+            "asset".to_owned(),
+            format!("{API_BASE}/assets/v1/assets/{asset_id}"),
+        )
+        .await
     }
 
     /// Gets an asset delivery URL of an asset
